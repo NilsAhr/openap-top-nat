@@ -122,7 +122,7 @@ class Base:
 
     def initial_guess(self, flight: pd.DataFrame = None):
         m_guess = self.mass_init * np.ones(self.nodes + 1)
-        ts_guess = np.linspace(0, 6 * 3600, self.nodes + 1)
+        ts_guess = np.linspace(0, 12 * 3600, self.nodes + 1)
 
         if flight is None:
             h_cr = self.aircraft["cruise"]["height"]

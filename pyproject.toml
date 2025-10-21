@@ -1,5 +1,5 @@
 [project]
-name = "openap-top"
+name = "openap-top-nat"
 version = "1.8"
 description = "Trajectory OPtimizer based on OpenAP model"
 authors = [{ name = "Junzi Sun", email = "git@junzis.com" }]
@@ -65,7 +65,7 @@ allow-namespace-packages = true
 
 [tool.hatch.build.targets.wheel]
 universal = true
-packages = ["openap"]
+packages = ["top"]
 
 [build-system]
 requires = ["hatchling"]
