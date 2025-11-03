@@ -23,9 +23,11 @@ class Base:
         actype: str,
         origin: Union[str, tuple],
         destination: Union[str, tuple],
-        m0: float = 0.8,
+        m0: float = 0.95,
         dT: float = 0.0,
         use_synonym=False,
+        perf_model="openap",
+        bada_path: str = None,
     ):
         """OpenAP trajectory optimizer.
 
@@ -33,9 +35,22 @@ class Base:
             actype (str): ICAO aircraft type code
             origin (Union[str, tuple]): ICAO or IATA code of airport, or tuple (lat, lon)
             destination (Union[str, tuple]): ICAO or IATA code of airport, or tuple (lat, lon)
-            m0 (float, optional): Takeoff mass factor. Defaults to 0.8 (of MTOW).
+            m0 (float, optional): Takeoff mass factor. Defaults to 0.95 (of MTOW).
             dT (float, optional): Temperature shift from standard ISA. Default = 0
+            use_synonym (bool, optional): Use aircraft synonym database to find similar aircraft if actype is not found. Defaults to False.
+            perf_model (str, optional): Performance model to use ('openap' or 'bada3'). Defaults to 'openap'.
+            bada_path (str, optional): Path to BADA3 performance data files. Required if perf_model is 'bada3'. Defaults to None.
         """
+        # Validate performance model
+        if perf_model not in ["openap", "bada"]:
+            raise ValueError("perf_model must be either 'openap' or 'bada'")
+        
+        if perf_model == "bada" and bada_path is None:
+            raise ValueError("bada_path must be provided when using BADA performance model")
+        
+        self.perf_model = perf_model
+        self.bada_path = bada_path
+
         if isinstance(origin, str):
             ap1 = openap.nav.airport(origin)
             self.lat1, self.lon1 = ap1["lat"], ap1["lon"]
