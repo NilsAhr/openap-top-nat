@@ -11,6 +11,9 @@ import pandas as pd
 from openap.extra.aero import fpm, ft, kts
 from pyproj import Proj
 
+# bada3_adapter import
+from .perf import make_bada3_backend
+
 try:
     from . import tools
 except:
@@ -26,8 +29,9 @@ class Base:
         m0: float = 0.95,
         dT: float = 0.0,
         use_synonym=False,
-        perf_model="openap",
-        bada_path: str = None,
+        perf_model: str = "openap",
+        bada3_path: str | None = None,
+        debug: bool = False,
     ):
         """OpenAP trajectory optimizer.
 
@@ -39,52 +43,105 @@ class Base:
             dT (float, optional): Temperature shift from standard ISA. Default = 0
             use_synonym (bool, optional): Use aircraft synonym database to find similar aircraft if actype is not found. Defaults to False.
             perf_model (str, optional): Performance model to use ('openap' or 'bada3'). Defaults to 'openap'.
-            bada_path (str, optional): Path to BADA3 performance data files. Required if perf_model is 'bada3'. Defaults to None.
+            bada3_path (str, optional): Path to BADA3 performance data files. Required if perf_model is 'bada3'. Defaults to None.
         """
-        # Validate performance model
-        if perf_model not in ["openap", "bada"]:
-            raise ValueError("perf_model must be either 'openap' or 'bada'")
-        
-        if perf_model == "bada" and bada_path is None:
-            raise ValueError("bada_path must be provided when using BADA performance model")
-        
-        self.perf_model = perf_model
-        self.bada_path = bada_path
 
+        self.debug = debug
+
+        # Validate performance model
+        if perf_model not in ["openap", "bada3"]:
+            raise ValueError("perf_model must be either 'openap' or 'bada3'")
+
+        if perf_model == "bada3" and bada3_path is None:
+            raise ValueError("bada3_path must be provided when using BADA3 performance model")
+
+        self.perf_model = perf_model
+        self.bada3_path = bada3_path
+
+        print(f"Debug - origin: {origin}, type: {type(origin)}, isinstance(str): {isinstance(origin, str)}")
+        # ORIGIN airport data
         if isinstance(origin, str):
             ap1 = openap.nav.airport(origin)
             self.lat1, self.lon1 = ap1["lat"], ap1["lon"]
+            print(f"Debug - airport data: lat={self.lat1}, lon={self.lon1}")
         else:
+            print(f"Debug - treating as coordinates: {origin}")
             self.lat1, self.lon1 = origin
 
+        print(f"Debug - destination: {destination}, type: {type(destination)}")
+        # DESTINATION airport data
         if isinstance(destination, str):
             ap2 = openap.nav.airport(destination)
             self.lat2, self.lon2 = ap2["lat"], ap2["lon"]
         else:
             self.lat2, self.lon2 = destination
 
+        # aircraft data
         self.actype = actype
-        self.aircraft = oc.prop.aircraft(self.actype, use_synonym=use_synonym)
-        self.engtype = self.aircraft["engine"]["default"]
-        self.engine = oc.prop.engine(self.aircraft["engine"]["default"])
 
+        if self.perf_model.lower() == "bada3":
+            # Import BADA3 here to avoid circular imports
+            from openap.addon import bada3 as _bada3
+            
+            try:
+                # Load BADA3 aircraft data first (primary source)
+                bada3_aircraft_data = _bada3.load_bada3(self.actype, self.bada3_path)
+                self.aircraft = self._create_aircraft_from_bada3(bada3_aircraft_data)
+                
+                # Fill missing fields with OpenAP data if available
+                try:
+                    openap_aircraft = oc.prop.aircraft(self.actype, use_synonym=use_synonym)
+                    self._fill_missing_aircraft_data(openap_aircraft)
+                except Exception:
+                    pass
+            except Exception as e:
+                raise RuntimeError(f"Failed to load BADA3 data for {actype}: {e}")
+        else:
+            # Standard OpenAP mode
+            self.aircraft = oc.prop.aircraft(self.actype, use_synonym=use_synonym)
+
+        # Engine setup - simplified for BADA3
+        if self.perf_model.lower() == "bada3":
+            # BADA3 uses aircraft-level performance
+            self.engtype = self.aircraft["engine"].get("default", f"{self.actype}_bada3")
+            self.engine = {
+                "name": self.engtype,
+                "type": self.aircraft["engine"]["type"],
+                "number": self.aircraft["engine"]["number"]
+            }
+        else:
+            # OpenAP engine validation and loading
+            self.engtype = self.aircraft["engine"]["default"]
+            self.engine = oc.prop.engine(self.aircraft["engine"]["default"])
+
+        # Initialize aircraft parameters from the aircraft dict
         self.mass_init = m0 * self.aircraft["mtow"]
         self.oew = self.aircraft["oew"]
-        self.mlw = self.aircraft["mlw"]
-        self.fuel_max = self.aircraft["mfc"]
-        self.mach_max = self.aircraft["mmo"]
+        self.mlw = self.aircraft.get("mlw", self.aircraft["mtow"])  # fallback
+        self.fuel_max = self.aircraft.get("mfc", self.aircraft["mtow"] - self.aircraft["oew"])  # fallback
+        self.mach_max = self.aircraft.get("mmo", 0.85)  # fallback
         self.dT = dT
-
         self.use_synonym = use_synonym
 
-        self.thrust = oc.Thrust(actype, use_synonym=self.use_synonym)
-        self.wrap = openap.WRAP(actype, use_synonym=self.use_synonym)
-        self.drag = oc.Drag(actype, wave_drag=True, use_synonym=self.use_synonym)
-        self.fuelflow = oc.FuelFlow(
-            actype, wave_drag=True, use_synonym=self.use_synonym
-        )
-        self.emission = oc.Emission(actype, use_synonym=self.use_synonym)
+        # Performance model initialization
+        if self.perf_model.lower() == "bada3":
+            self.thrust, self.drag, self.fuelflow, _ = make_bada3_backend(
+                self.actype, self.bada3_path
+            )
+            # For BADA3, we don't have WRAP or Emission models
+            self.wrap = None
+            self.emission = None
+        else:
+            # Existing OpenAP behavior
+            self.thrust = oc.Thrust(actype, use_synonym=self.use_synonym)
+            self.wrap = openap.WRAP(actype, use_synonym=self.use_synonym)
+            self.drag = oc.Drag(actype, wave_drag=True, use_synonym=self.use_synonym)
+            self.fuelflow = oc.FuelFlow(actype, wave_drag=True, use_synonym=self.use_synonym)
+            self.emission = oc.Emission(actype, use_synonym=self.use_synonym)
 
+        ########
+        # Test coordinate projection
+        ########
         # self.proj = Proj(
         #     proj="lcc",
         #     ellps="WGS84",
@@ -98,12 +155,84 @@ class Base:
 
         # Check cruise range
         self.range = oc.aero.distance(self.lat1, self.lon1, self.lat2, self.lon2)
-        max_range = self.wrap.cruise_range()["maximum"] * 1.2
-        if self.range > max_range * 1000:
-            warnings.warn("The destination is likely out of maximum cruise range.")
-
-        self.debug = False
+        if self.wrap is not None:  # Add this check
+            max_range = self.wrap.cruise_range()["maximum"] * 1.2
+            if self.range > max_range * 1000:
+                warnings.warn("The destination is likely out of maximum cruise range.")
+        else:
+            # For BADA3, we don't have WRAP, so skip range check or implement BADA3 range check
+            if self.debug:
+                print("Cruise range check skipped for BADA3 mode (WRAP not available)")
         self.setup()
+
+    def _create_aircraft_from_bada3(self, bada3_data: dict) -> dict:
+        """Create aircraft dictionary from BADA3 data with OpenAP structure"""
+        aircraft = {
+            # Mass parameters
+            "mtow": bada3_data["mtow"],  # already in kg
+            "oew": bada3_data["oew"],    # already in kg
+            "mpl": bada3_data["mpl"],    # already in kg
+            
+            # Flight envelope
+            "mmo": bada3_data["mmo"],
+            "vmo": bada3_data["vmo"],
+            "ceiling": bada3_data["ceiling"], # in meters
+            
+            # Geometry
+            "wing": {
+                "area": bada3_data["wing"]["area"],
+                "span": bada3_data["wing"]["span"],
+            },
+            "fuselage": {
+                "length": bada3_data["fuselage"]["length"], 
+            },
+            
+            # Engine
+            "engine": {
+                "type": bada3_data["engine"]["type"],
+                "number": bada3_data["engine"]["number"],
+                "default": f"{bada3_data['engine']['type']}_bada3",  # TODO, add correct name!
+            },
+            
+            # Cruise parameters
+            "cruise": {
+                "height": bada3_data["ceiling"],  # already converted to meters
+            },
+        }
+        
+        # Calculate missing parameters
+        aircraft["mlw"] = bada3_data["oew"] + bada3_data["mpl"]  # OEW + max payload
+        aircraft["mfc"] = bada3_data["mtow"] - bada3_data["oew"]  # max fuel capacity
+        
+        return aircraft
+
+    def _fill_missing_aircraft_data(self, openap_aircraft: dict):
+        """Fill missing aircraft data with OpenAP values where BADA3 data is incomplete"""
+        
+        # List of fields that might be missing in BADA3 but available in OpenAP
+        openap_fields = [
+            "limits", "flaps", "gear", "approach", "landing", 
+            "takeoff", "climb", "descent", "service"
+        ]
+        
+        for field in openap_fields:
+            if field in openap_aircraft and field not in self.aircraft:
+                self.aircraft[field] = openap_aircraft[field]
+        
+        # Fill missing engine data
+        if "engine" in openap_aircraft:
+            openap_engine = openap_aircraft["engine"]
+            if "default" not in self.aircraft["engine"] and "default" in openap_engine:
+                self.aircraft["engine"]["default"] = openap_engine["default"]
+            
+            # Add other engine parameters that might be missing
+            for eng_param in ["options", "max_thrust", "bypass_ratio"]:
+                if eng_param in openap_engine and eng_param not in self.aircraft["engine"]:
+                    self.aircraft["engine"][eng_param] = openap_engine[eng_param]
+        
+        # Fill missing performance limits if available
+        if "limits" in openap_aircraft:
+            self.aircraft.setdefault("limits", openap_aircraft["limits"])
 
     def proj(self, lon, lat, inverse=False, symbolic=False):
         lat0 = (self.lat1 + self.lat2) / 2
@@ -168,21 +297,32 @@ class Base:
 
     def change_engine(self, engtype):
         self.engtype = engtype
-        self.engine = oc.prop.engine(engtype)
-        self.thrust = oc.Thrust(
-            self.actype,
-            engtype,
-            use_synonym=self.use_synonym,
-            force_engine=True,
-        )
-        self.fuelflow = oc.FuelFlow(
-            self.actype,
-            engtype,
-            wave_drag=True,
-            use_synonym=self.use_synonym,
-            force_engine=True,
-        )
-        self.emission = oc.Emission(self.actype, engtype, use_synonym=self.use_synonym)
+        # bada3 case
+        if self.perf_model.lower() == "bada3":
+            # For BADA3, engine changes might not be supported
+            warnings.warn("Engine change with BADA3 performance model may not be fully supported")
+            # Try to update engine info in aircraft dict
+            try:
+                self.engine = oc.prop.engine(engtype)
+            except Exception:
+                self.engine = {"name": engtype, "type": "turbofan"}
+        else:
+            # Original OpenAP behavior
+            self.engine = oc.prop.engine(engtype)
+            self.thrust = oc.Thrust(
+                self.actype,
+                engtype,
+                use_synonym=self.use_synonym,
+                force_engine=True,
+            )
+            self.fuelflow = oc.FuelFlow(
+                self.actype,
+                engtype,
+                wave_drag=True,
+                use_synonym=self.use_synonym,
+                force_engine=True,
+            )
+            self.emission = oc.Emission(self.actype, engtype, use_synonym=self.use_synonym)
 
     def collocation_coeff(self):
         # Get collocation points using Legendre polynomials
@@ -354,6 +494,8 @@ class Base:
         )
 
     def _calc_emission(self, x, u, symbolic=True):
+        if self.perf_model.lower() == "bada3":
+            raise NotImplementedError("Emission calculations not available with BADA3 performance model")
         xp, yp, h, m = x[0], x[1], x[2], x[3]
         mach, vs, psi = u[0], u[1], u[2]
 
