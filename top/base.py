@@ -103,7 +103,7 @@ class Base:
         # Engine setup - simplified for BADA3
         if self.perf_model.lower() == "bada3":
             # BADA3 uses aircraft-level performance
-            self.engtype = self.aircraft["engine"].get("default", f"{self.actype}_bada3")
+            self.engtype = self.aircraft["engine"]["type"] # "turbofan", "turboprop", etc.
             self.engine = {
                 "name": self.engtype,
                 "type": self.aircraft["engine"]["type"],
@@ -111,7 +111,7 @@ class Base:
             }
         else:
             # OpenAP engine validation and loading
-            self.engtype = self.aircraft["engine"]["default"]
+            self.engtype = self.aircraft["engine"]["default"] # "CFM56-7B24", etc.
             self.engine = oc.prop.engine(self.aircraft["engine"]["default"])
 
         # Initialize aircraft parameters from the aircraft dict
@@ -191,7 +191,7 @@ class Base:
             "engine": {
                 "type": bada3_data["engine"]["type"],
                 "number": bada3_data["engine"]["number"],
-                "default": f"{bada3_data['engine']['type']}_bada3",  # TODO, add correct name!
+                "default": bada3_data['engine']['type'],
             },
             
             # Cruise parameters
@@ -684,8 +684,9 @@ class Base:
         return ratio * c1 / n1 + (1 - ratio) * c2 / n2
 
     def to_trajectory(self, ts_final, x_opt, u_opt):
-        X = x_opt.full()
-        U = u_opt.full()
+        # Extract optimized states and controls
+        X = x_opt.full()  # [xp, yp, h, mass, ts]
+        U = u_opt.full()  # [mach, vs, psi]
 
         # Extrapolate the final control point, Uf
         U2 = U[:, -2:-1]
@@ -701,10 +702,11 @@ class Base:
 
         xp, yp, h, mass, ts = X
         mach, vs, psi = U
-        lon, lat = self.proj(xp, yp, inverse=True)
+        # Convert to readable format
+        lon, lat = self.proj(xp, yp, inverse=True) # Convert back to lat/lon
         ts_ = np.linspace(0, ts_final, n).round(4)
-        tas = (openap.aero.mach2tas(mach, h, dT=self.dT) / kts).round(4)
-        alt = (h / ft).round()
+        tas = (openap.aero.mach2tas(mach, h, dT=self.dT) / kts).round(4) # Convert Mach to TAS
+        alt = (h / ft).round() # Convert to feet
         vertrate = (vs / fpm).round()
 
         df = pd.DataFrame(
@@ -724,20 +726,43 @@ class Base:
             )
         )
 
-        fuelflow = openap.FuelFlow(
-            self.actype,
-            self.engtype,
-            use_synonym=self.use_synonym,
-            force_engine=True,
-        )
-
-        df = df.assign(
-            fuelflow=(
-                fuelflow.enroute(
-                    mass=df.mass, tas=tas, alt=alt, vs=vertrate, dT=self.dT
-                )
+        # Handle fuel flow calculation based on performance model
+        if self.perf_model.lower() == "bada3":
+            # Use BADA3 fuel flow for trajectory output
+            ff_values = []
+            for i in range(len(df)):
+                try:
+                    ff = self.fuelflow.enroute(
+                        mass=df.iloc[i].mass, 
+                        tas_kt=df.iloc[i].tas, 
+                        alt_ft=df.iloc[i].altitude, 
+                        vs=df.iloc[i].vertical_rate
+                    )
+                    # Convert CasADi array to float if needed
+                    if hasattr(ff, 'full'):
+                        ff_values.append(float(ff.full().flatten()[0]))
+                    else:
+                        ff_values.append(float(ff))
+                except Exception as e:
+                    print(f"Warning: BADA3 fuel flow calculation failed at step {i}: {e}")
+                    ff_values.append(0.0)
+            
+            df = df.assign(fuelflow=ff_values)
+        else:
+            # Original OpenAP fuel flow calculation
+            fuelflow = openap.FuelFlow(
+                self.actype,
+                self.engtype,
+                use_synonym=self.use_synonym,
+                force_engine=True,
             )
-        )
+            df = df.assign(
+                fuelflow=(
+                    fuelflow.enroute(
+                        mass=df.mass, tas=tas, alt=alt, vs=vertrate, dT=self.dT
+                    )
+                )
+            )   
 
         if self.wind:
             wu = self.wind.calc_u(xp, yp, h, ts)
