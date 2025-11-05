@@ -167,12 +167,28 @@ class Base:
 
     def _create_aircraft_from_bada3(self, bada3_data: dict) -> dict:
         """Create aircraft dictionary from BADA3 data with OpenAP structure"""
+        # Calculate derived parameters
+        mtow = bada3_data["mtow"]
+        oew = bada3_data["oew"]
+        mpl = bada3_data["mpl"]
+        
+        # Calculate MFC using MTOW-based proxy
+        alpha = 0.28 if mtow / 1000 < 100 else (0.38 if mtow / 1000 < 200 else 0.48)
+        mfc_proxy = alpha * mtow
+        mfc_structural_limit = mtow - oew  # Structural limit (no payload)
+        mfc = min(mfc_proxy, mfc_structural_limit)
+        
+        # Calculate other mass parameters
+        mlw = oew + mpl  # Maximum Landing Weight
+        mzfw = oew + mpl  # Maximum Zero Fuel Weight
+
         aircraft = {
             # Mass parameters
-            "mtow": bada3_data["mtow"],  # already in kg
-            "oew": bada3_data["oew"],    # already in kg
-            "mpl": bada3_data["mpl"],    # already in kg
-            
+            "mtow": mtow,  # already in kg
+            "oew": oew,    # already in kg
+            "mpl": mpl,    # already in kg
+            "mzfw": mzfw,  # OEW + max payload
+
             # Flight envelope
             "mmo": bada3_data["mmo"],
             "vmo": bada3_data["vmo"],
@@ -198,11 +214,21 @@ class Base:
             "cruise": {
                 "height": bada3_data["ceiling"],  # already converted to meters
             },
+            "limits": {
+                "MTOW": mtow,           # kg
+                "OEW": oew,             # kg
+                "MLW": mlw,             # OEW + max payload
+                "MZFW": mzfw,           # OEW + max payload
+                "MFC_lower": mtow - (oew + mpl),  # lower bound MTOW - MZFW
+                "MFC_upper": mtow - oew,  # upper bound MTOW - OEW
+                # max fuel capacity (proxy based on MTOW fraction)
+                "MFC": mfc,               # kg  
+                "VMO": bada3_data["vmo"],             # knots
+                "MMO": bada3_data["mmo"],             # Mach
+                "ceiling": bada3_data["ceiling"],     # meters, h(altitude - state variable treat in meters)
+            }
+
         }
-        
-        # Calculate missing parameters
-        aircraft["mlw"] = bada3_data["oew"] + bada3_data["mpl"]  # OEW + max payload
-        aircraft["mfc"] = bada3_data["mtow"] - bada3_data["oew"]  # max fuel capacity
         
         return aircraft
 
