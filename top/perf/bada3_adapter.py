@@ -19,6 +19,8 @@ import tempfile
 import shutil
 from pathlib import Path
 
+from openap.base import FuelFlowBase
+
 # Try importing BADA3 addon from OpenAP
 try:
     from openap.addon import bada3 as _bada3
@@ -172,7 +174,7 @@ class BADA3ThrustAdapter:
         return self._thr.idle(tas_kt, alt_ft, dT=dT, config="CR")
 
 
-class BADA3FuelFlowAdapter:
+class BADA3FuelFlowAdapter(FuelFlowBase):
     """
     Adapter to match the optimizer's FuelFlow interface.
 
@@ -183,17 +185,41 @@ class BADA3FuelFlowAdapter:
     """
 
     def __init__(self, actype: str, bada3_path: str, model: Optional[BADA3Model] = None):
+        # Initialize base class - this sets up self.sci and self.aero with context awareness
+        super().__init__(actype)
+        
         _require_bada3()
         self.actype = actype.upper()
         self._model = model or load_model(actype, bada3_path)
         self._ff = _bada3.FuelFlow(actype, bada3_path, model=self._model.data)
+
+        print(f"DEBUG - BADA3FuelFlowAdapter sci type: {type(self.sci)}")
+        print(f"DEBUG - BADA3FuelFlowAdapter sci module: {self.sci}")
+        if hasattr(self.sci, 'arctan2'):
+            print("DEBUG - sci has arctan2 ✓")
+        else:
+            print("DEBUG - sci missing arctan2 ✗")
+            if hasattr(self.sci, 'atan2'):
+                print("DEBUG - sci has atan2 instead")
+        self._ff.sci = self.sci # Will be numpy or CasADi depending on how adapter was created
+        self._ff.aero = self.aero
+        print(f"DEBUG - _ff.sci type: {type(self._ff.sci)}")
 
     # Accept **kwargs to remain compatible with calls that pass dT or other args
     def nominal(self, mass: Any, tas_kt: Any, alt_ft: Any, vs: Any = 0, **kwargs) -> Any:
         return self._ff.nominal(mass, tas_kt, alt_ft, vs)
 
     def enroute(self, mass: Any, tas_kt: Any, alt_ft: Any, vs: Any = 0, **kwargs) -> Any:
-        return self._ff.enroute(mass, tas_kt, alt_ft, vs)
+        print(f"DEBUG - enroute called with symbolic inputs: {hasattr(mass, 'shape') or str(type(mass))}")
+        try:
+            result = self._ff.enroute(mass, tas_kt, alt_ft, vs)
+            print(f"DEBUG - enroute succeeded, result type: {type(result)}")
+            return result
+        except AttributeError as e:
+            print(f"DEBUG - AttributeError in enroute: {e}")
+            print(f"DEBUG - _ff.sci at error time: {type(self._ff.sci)}")
+            raise
+        #return self._ff.enroute(mass, tas_kt, alt_ft, vs)
 
     def idle(self, mass: Any, tas_kt: Any, alt_ft: Any, **kwargs) -> Any:
         return self._ff.idle(mass, tas_kt, alt_ft)
