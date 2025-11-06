@@ -2,7 +2,7 @@
 name = "openap-top-nat"
 version = "1.8"
 description = "Trajectory OPtimizer based on OpenAP model"
-authors = [{ name = "Junzi Sun", email = "git@junzis.com" }]
+authors = [{ name = "Junzi Sun & Nils Ahrenhold", email = "git@junzis.com" }]
 license = { text = "GNU LGPL v3" }
 readme = "README.md"
 classifiers = [
