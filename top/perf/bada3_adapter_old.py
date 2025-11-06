@@ -15,9 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
-import tempfile
-import shutil
-from pathlib import Path
 
 # Try importing BADA3 addon from OpenAP
 try:
@@ -48,65 +45,11 @@ def _require_bada3():
 def load_model(actype: str, bada3_path: str) -> BADA3Model:
     """Load and parse the BADA3 aircraft model for actype from bada3_path."""
     _require_bada3()
-    
-    try:
-        # Try loading with default UTF-8 encoding first
-        model = _bada3.load_bada3(actype, bada3_path)
-        return BADA3Model(model)
-    except UnicodeDecodeError as e:
-        print(f"UTF-8 encoding failed for {actype}: {e}")
-        print("Attempting to fix SYNONYM.NEW encoding issue...")
-        
-        # Handle the SYNONYM.NEW encoding issue specifically
-        return _load_model_with_synonym_fix(actype, bada3_path)
+    model = _bada3.load_bada3(actype, bada3_path)
+    return BADA3Model(model)
 
 
-def _load_model_with_synonym_fix(actype: str, bada3_path: str) -> BADA3Model:
-    """Load BADA3 model with SYNONYM.NEW encoding conversion."""
-    bada3_dir = Path(bada3_path)
-    synonym_file = bada3_dir / "SYNONYM.NEW"
-    
-    if not synonym_file.exists():
-        raise FileNotFoundError(f"SYNONYM.NEW not found in {bada3_path}")
-    
-    # Create a temporary directory with a UTF-8 converted SYNONYM.NEW
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        
-        # Convert SYNONYM.NEW from latin-1 to UTF-8
-        try:
-            print("Converting SYNONYM.NEW from latin-1 to UTF-8...")
-            with open(synonym_file, 'r', encoding='latin-1') as f:
-                content = f.read()
-            with open(temp_path / "SYNONYM.NEW", 'w', encoding='utf-8') as f:
-                f.write(content)
-            print("✓ SYNONYM.NEW converted successfully")
-        except Exception as e:
-            raise ValueError(f"Failed to convert SYNONYM.NEW: {e}")
-        
-        # Copy the aircraft-specific OPF file (these are usually UTF-8 compatible)
-        opf_file = bada3_dir / f"{actype.upper()}__.OPF"
-        if opf_file.exists():
-            shutil.copy2(opf_file, temp_path)
-        else:
-            raise FileNotFoundError(f"OPF file not found for aircraft {actype}")
-        
-        # Copy other aircraft files if they exist
-        for suffix in ['APF', 'PTD', 'PTF']:
-            src_file = bada3_dir / f"{actype.upper()}__.{suffix}"
-            if src_file.exists():
-                shutil.copy2(src_file, temp_path)
-        
-        # Try loading with the converted files
-        try:
-            model = _bada3.load_bada3(actype, str(temp_path))
-            print(f"✓ Successfully loaded {actype} with fixed encoding")
-            return BADA3Model(model)
-        except Exception as load_error:
-            raise ValueError(f"Failed to load {actype} even after encoding fix: {load_error}")
-
-
-# Rest of the adapter classes remain the same...
+# Each adapter class wraps the corresponding BADA3 performance class and exposes the exact interface top-nat optimizer expects:
 class BADA3DragAdapter:
     """
     Adapter to match the optimizer's Drag interface.

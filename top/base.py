@@ -81,11 +81,12 @@ class Base:
 
         if self.perf_model.lower() == "bada3":
             # Import BADA3 here to avoid circular imports
-            from openap.addon import bada3 as _bada3
+            from .perf.bada3_adapter import load_model
             
             try:
-                # Load BADA3 aircraft data first (primary source)
-                bada3_aircraft_data = _bada3.load_bada3(self.actype, self.bada3_path)
+                # Use the encoding-safe loader from bada3_adapter
+                bada3_model = load_model(self.actype, self.bada3_path)
+                bada3_aircraft_data = bada3_model.data
                 self.aircraft = self._create_aircraft_from_bada3(bada3_aircraft_data)
                 
                 # Fill missing fields with OpenAP data if available
