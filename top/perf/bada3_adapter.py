@@ -175,35 +175,39 @@ class BADA3ThrustAdapter:
 
 
 class BADA3FuelFlowAdapter(FuelFlowBase):
-    """
-    Adapter to match the optimizer's FuelFlow interface.
-
-    Must provide:
-    - nominal(mass, tas_kt, alt_ft, vs=0, dT=? ignored) -> kg/s
-    - enroute(mass, tas_kt, alt_ft, vs=0, dT=? ignored) -> kg/s
-    - idle(mass, tas_kt, alt_ft, vs=? ignored, dT=? ignored) -> kg/s
-    """
-
     def __init__(self, actype: str, bada3_path: str, model: Optional[BADA3Model] = None):
-        # Initialize base class - this sets up self.sci and self.aero with context awareness
+        # Initialize base class first to get initial sci/aero setup
         super().__init__(actype)
+        
+        print("version 18:00")
+        # Check if CasADi context is available and force use it
+        try:
+            import openap.casadi as oc
+            # Try to access numpy_override module which contains CasADi-compatible functions
+            if hasattr(oc, 'numpy_override'):
+                self.sci = oc.numpy_override
+                print(f"DEBUG - Overrode sci with CasADi numpy_override: {type(self.sci)}")
+            else:
+                print("DEBUG - openap.casadi imported but no numpy_override found")
+        except (ImportError, AttributeError) as e:
+            print(f"DEBUG - Could not import CasADi context: {e}")
         
         _require_bada3()
         self.actype = actype.upper()
         self._model = model or load_model(actype, bada3_path)
         self._ff = _bada3.FuelFlow(actype, bada3_path, model=self._model.data)
 
-        print(f"DEBUG - BADA3FuelFlowAdapter sci type: {type(self.sci)}")
-        print(f"DEBUG - BADA3FuelFlowAdapter sci module: {self.sci}")
+        # Force the internal BADA3 FuelFlow to use the same sci module
+        self._ff.sci = self.sci
+        self._ff.aero = self.aero
+        
+        print(f"DEBUG - Final adapter sci type: {type(self.sci)}")
         if hasattr(self.sci, 'arctan2'):
             print("DEBUG - sci has arctan2 ✓")
+        elif hasattr(self.sci, 'atan2'):
+            print("DEBUG - sci has atan2 (CasADi) ✓")
         else:
-            print("DEBUG - sci missing arctan2 ✗")
-            if hasattr(self.sci, 'atan2'):
-                print("DEBUG - sci has atan2 instead")
-        self._ff.sci = self.sci # Will be numpy or CasADi depending on how adapter was created
-        self._ff.aero = self.aero
-        print(f"DEBUG - _ff.sci type: {type(self._ff.sci)}")
+            print("DEBUG - sci missing trigonometric functions ✗")
 
     # Accept **kwargs to remain compatible with calls that pass dT or other args
     def nominal(self, mass: Any, tas_kt: Any, alt_ft: Any, vs: Any = 0, **kwargs) -> Any:
