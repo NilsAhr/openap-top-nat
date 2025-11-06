@@ -282,7 +282,8 @@ class Base:
             x, y = lon, lat
             if symbolic:
                 distances = ca.sqrt(x**2 + y**2)
-                bearing = ca.arctan2(x, y) * 180 / 3.14159
+                bearing = ca.atan2(x, y) * 180 / 3.14159
+                #bearing = ca.arctan2(x, y) * 180 / 3.14159
                 lat, lon = oc.aero.latlon(lat0, lon0, distances, bearing)
             else:
                 distances = np.sqrt(x**2 + y**2)
@@ -400,7 +401,8 @@ class Base:
         mach, vs, psi = u[0], u[1], u[2]
 
         v = oc.aero.mach2tas(mach, h, dT=self.dT)
-        gamma = ca.arctan2(vs, v)
+        gamma = ca.atan2(vs, v)
+        #gamma = ca.arctan2(vs, v)
 
         dx = v * ca.sin(psi) * ca.cos(gamma)
         if self.wind is not None:

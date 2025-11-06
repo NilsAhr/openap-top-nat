@@ -241,7 +241,8 @@ class Descent(Base):
             vs = U[k][1]
             h = X[k][2]
             v = oc.aero.mach2tas(U[k][0], h, dT=self.dT)
-            gamma = ca.arctan2(vs, v)
+            gamma = ca.atan2(vs, v)
+            #gamma = ca.arctan2(vs, v)
             thrust_idle = self.thrust.descent_idle(v / kts, h / ft, dT=self.dT)
             drag = self.drag.clean(X[k][3], v / kts, h / ft, dT=self.dT)
             g.append(thrust_idle - X[k][3] * 9.8 * ca.sin(gamma) - drag)
@@ -255,7 +256,8 @@ class Descent(Base):
             vs = U[k][1]
             vk = oc.aero.mach2tas(U[k][0], hk, dT=self.dT)
             vk1 = oc.aero.mach2tas(U[k + 1][0], hk1, dT=self.dT)
-            pa = ca.arctan2(vs, vk) * 180 / pi
+            pa = ca.atan2(vs, vk) * 180 / pi
+            #pa = ca.arctan2(vs, vk) * 180 / pi
             dvdt = (vk1 - vk) / self.dt
             dhdt = (hk1 - hk) / self.dt
             thrust_idle = self.thrust.descent_idle(vk / kts, hk / ft, dT=self.dT)
