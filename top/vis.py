@@ -87,28 +87,39 @@ def map(df, windfield=None, ax=None, barb_steps=10):
     return plt
 
 
-def trajectory(df, windfield=None, barb_steps=10):
+def trajectory(df, df2=None, windfield=None, barb_steps=10,
+               label1="df1", label2="df2",
+               color1="tab:green", color2="tab:blue"):
     fig = plt.figure(figsize=(12, 5))
 
     gs = GridSpec(3, 2)
 
     ax1 = fig.add_subplot(gs[0, 0])
-    ax1.plot(df.ts, df.altitude, lw=2, marker=".")
+    ax1.plot(df.ts, df.altitude, lw=2, marker=".", color=color1, label=label1)
+    if df2 is not None:
+        ax1.plot(df2.ts, df2.altitude, lw=2, marker=".", color=color2, label=label2)
     ax1.set_ylabel("altitude (ft)")
     ax1.set_ylim(0, 45_000)
     ax1.grid(ls=":")
+    ax1.legend()
 
     ax2 = fig.add_subplot(gs[1, 0])
-    ax2.plot(df.ts, df.tas, lw=2, marker=".")
+    ax2.plot(df.ts, df.tas, lw=2, marker=".", color=color1, label=label1)
+    if df2 is not None:
+        ax2.plot(df2.ts, df2.tas, lw=2, marker=".", color=color2, label=label2)
     ax2.set_ylabel("TAS")
     ax2.set_ylim(0, 600)
     ax2.grid(ls=":")
+    ax2.legend()
 
     ax3 = fig.add_subplot(gs[2, 0])
-    ax3.plot(df.ts, df.vertical_rate, lw=2, marker=".")
+    ax3.plot(df.ts, df.vertical_rate, lw=2, marker=".", color=color1, label=label1)
+    if df2 is not None:
+        ax3.plot(df2.ts, df2.vertical_rate, lw=2, marker=".", color=color2, label=label2)
     ax3.set_ylabel("VS (ft/min)")
     ax3.set_ylim(-3000, 3000)
     ax3.grid(ls=":")
+    ax3.legend()
 
     ax5 = fig.add_subplot(
         gs[:, 1],
@@ -118,7 +129,26 @@ def trajectory(df, windfield=None, barb_steps=10):
         ),
     )
 
+    # draw base map and first trajectory using existing helper
     map(df, windfield, ax=ax5, barb_steps=barb_steps)
+
+    # overlay second trajectory if provided
+    if df2 is not None:
+        ax5.plot(
+            df2.longitude,
+            df2.latitude,
+            color=color2,
+            transform=ccrs.Geodetic(),
+            linewidth=2,
+            marker=".",
+            label=label2,
+        )
+        # mark start/end of second trajectory
+        ax5.scatter(df2.longitude.iloc[0], df2.latitude.iloc[0], c=color2, transform=ccrs.Geodetic())
+        ax5.scatter(df2.longitude.iloc[-1], df2.latitude.iloc[-1], c=color2, transform=ccrs.Geodetic())
+
+    # refresh legend to include any added items
+    ax5.legend()
 
     plt.tight_layout()
 

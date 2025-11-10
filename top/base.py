@@ -80,7 +80,6 @@ class Base:
         self.actype = actype
 
         if self.perf_model.lower() == "bada3":
-            #import openap.casadi as oc
             # Import BADA3 here to avoid circular imports
             from .perf.bada3_adapter import load_model
             
@@ -127,7 +126,6 @@ class Base:
 
         # Performance model initialization
         if self.perf_model.lower() == "bada3":
-            import openap.casadi as oc
 
             self.thrust, self.drag, self.fuelflow, _ = make_bada3_backend(
                 self.actype, self.bada3_path
