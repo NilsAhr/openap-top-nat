@@ -58,17 +58,17 @@ class Base:
         self.perf_model = perf_model
         self.bada3_path = bada3_path
 
-        print(f"Debug - origin: {origin}, type: {type(origin)}, isinstance(str): {isinstance(origin, str)}")
+        #print(f"Debug - origin: {origin}, type: {type(origin)}, isinstance(str): {isinstance(origin, str)}")
         # ORIGIN airport data
         if isinstance(origin, str):
             ap1 = openap.nav.airport(origin)
             self.lat1, self.lon1 = ap1["lat"], ap1["lon"]
-            print(f"Debug - airport data: lat={self.lat1}, lon={self.lon1}")
+            #print(f"Debug - airport data: lat={self.lat1}, lon={self.lon1}")
         else:
-            print(f"Debug - treating as coordinates: {origin}")
+            #print(f"Debug - treating as coordinates: {origin}")
             self.lat1, self.lon1 = origin
 
-        print(f"Debug - destination: {destination}, type: {type(destination)}")
+        #print(f"Debug - destination: {destination}, type: {type(destination)}")
         # DESTINATION airport data
         if isinstance(destination, str):
             ap2 = openap.nav.airport(destination)
@@ -554,23 +554,70 @@ class Base:
         return co2, h2o, sox, soot, nox
 
     def obj_fuel(self, x, u, dt, symbolic=True, **kwargs):
+        """
+        Fuel objective (kg) over one collocation interval.
+        x = [xp, yp, h, m, ts], u = [mach, vs, psi]
+        """
+        # unpack states and controls
         xp, yp, h, m, ts = x[0], x[1], x[2], x[3], x[4]
         mach, vs, psi = u[0], u[1], u[2]
 
+        # Choose aero conversion and fuelflow backend based on mode
         if symbolic:
-            fuelflow = self.fuelflow
+            # CasADi-safe conversions
             v = oc.aero.mach2tas(mach, h, dT=self.dT)
-        else:
-            fuelflow = openap.FuelFlow(
-                self.actype,
-                self.engtype,
-                use_synonym=self.use_synonym,
-                force_engine=True,
-            )
-            v = openap.aero.mach2tas(mach, h, dT=self.dT)
+            tas_kt = v / kts
+            alt_ft = h / ft
 
-        ff = fuelflow.enroute(m, v / kts, h / ft, vs / fpm, dT=self.dT)
+            if self.perf_model.lower() == "bada3":
+                fuelflow = self.fuelflow  # BADA3 adapter (symbolic-safe)
+            else:
+                fuelflow = oc.FuelFlow(
+                    self.actype,
+                    self.engtype,
+                    use_synonym=self.use_synonym,
+                    force_engine=True
+                    )
+
+        else:
+            # Numeric conversions
+            v = openap.aero.mach2tas(mach, h, dT=self.dT)
+            tas_kt = v / kts
+            alt_ft = h / ft
+
+            if self.perf_model.lower() == "bada3":
+                # Use the same BADA3 adapter for numeric pre-scaling too
+                fuelflow = self.fuelflow
+            else:
+                fuelflow = openap.FuelFlow(
+                    self.actype,
+                    self.engtype,
+                    use_synonym=self.use_synonym,
+                    force_engine=True
+                    )
+
+        # Fuel flow (kg/s), note our BADA3 adapter supports dT and numeric/symbolic inputs
+        ff = fuelflow.enroute(m, tas_kt, alt_ft, vs / fpm, dT=self.dT)
+
+        # Quadrature: fuel burned over interval = ff * dt
         return ff * dt
+    
+
+        # old
+        #if symbolic:
+        #    fuelflow = self.fuelflow
+        #    v = oc.aero.mach2tas(mach, h, dT=self.dT)
+        #else:
+        #    fuelflow = openap.FuelFlow(
+        #        self.actype,
+        #        self.engtype,
+        #        use_synonym=self.use_synonym,
+        #        force_engine=True,
+        #    )
+        #    v = openap.aero.mach2tas(mach, h, dT=self.dT)
+
+        #ff = fuelflow.enroute(m, v / kts, h / ft, vs / fpm, dT=self.dT)
+        #return ff * dt
 
     def obj_time(self, x, u, dt, **kwargs):
         return dt
