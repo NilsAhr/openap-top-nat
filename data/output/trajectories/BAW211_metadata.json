@@ -1,0 +1,12 @@
+{
+  "callsign": "BAW211",
+  "original_actype": "B744",
+  "actual_actype": "B744",
+  "m0": 0.95,
+  "origin": "EGLL",
+  "destination": "KMIA",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-12 16:40:00",
+  "timestamp": "2025-11-10T14:02:21.422418"
+}

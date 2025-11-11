@@ -1,0 +1,12 @@
+{
+  "callsign": "AEA026",
+  "original_actype": "A332",
+  "actual_actype": "A332",
+  "m0": 0.95,
+  "origin": "SLVR",
+  "destination": "LEMD",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-11 23:16:20",
+  "timestamp": "2025-11-10T14:02:21.416750"
+}

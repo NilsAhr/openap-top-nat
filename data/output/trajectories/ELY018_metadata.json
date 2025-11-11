@@ -1,0 +1,12 @@
+{
+  "callsign": "ELY018",
+  "original_actype": "B789",
+  "actual_actype": "B789",
+  "m0": 0.95,
+  "origin": "KMIA",
+  "destination": "LLBG",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-11 23:42:46",
+  "timestamp": "2025-11-10T14:02:21.422418"
+}

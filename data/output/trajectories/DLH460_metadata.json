@@ -1,0 +1,12 @@
+{
+  "callsign": "DLH460",
+  "original_actype": "A388",
+  "actual_actype": "A388",
+  "m0": 0.95,
+  "origin": "EDDM",
+  "destination": "KMIA",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-12 11:19:00",
+  "timestamp": "2025-11-10T14:02:21.422418"
+}

@@ -1,0 +1,12 @@
+{
+  "callsign": "DAL214",
+  "original_actype": "A332",
+  "actual_actype": "A332",
+  "m0": 0.95,
+  "origin": "KJFK",
+  "destination": "DNMM",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-12 04:25:00",
+  "timestamp": "2025-11-10T14:02:21.422418"
+}

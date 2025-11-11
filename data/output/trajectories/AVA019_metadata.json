@@ -1,0 +1,12 @@
+{
+  "callsign": "AVA019",
+  "original_actype": "B788",
+  "actual_actype": "B788",
+  "m0": 0.95,
+  "origin": "LEBL",
+  "destination": "SKBO",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-12 13:51:00",
+  "timestamp": "2025-11-10T14:02:21.422418"
+}

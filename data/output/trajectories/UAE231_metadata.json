@@ -1,0 +1,12 @@
+{
+  "callsign": "UAE231",
+  "original_actype": "A388",
+  "actual_actype": "A388",
+  "m0": 0.95,
+  "origin": "OMDB",
+  "destination": "KIAD",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-11 23:02:24",
+  "timestamp": "2025-11-10T14:02:21.416750"
+}

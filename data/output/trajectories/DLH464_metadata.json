@@ -1,0 +1,12 @@
+{
+  "callsign": "DLH464",
+  "original_actype": "B744",
+  "actual_actype": "B744",
+  "m0": 0.95,
+  "origin": "EDDF",
+  "destination": "KMCO",
+  "method": "Cruise",
+  "perf_model": "bada3",
+  "dep_time": "2019-03-12 13:27:00",
+  "timestamp": "2025-11-10T14:02:21.422418"
+}
