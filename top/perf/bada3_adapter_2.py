@@ -281,6 +281,14 @@ class BADA3ThrustAdapter:
 
 
 class BADA3FuelFlowAdapter(FuelFlowBase):
+    """
+    BADA3 fuel flow adapter using Bluesky-style calculation.
+    
+    Follows the fuel flow logic from Bluesky's perfbada.py:
+    - Thrust-based fuel flow for climb/acceleration phases
+    - Cruise correction (Cf_cruise) applied ONLY during level cruise
+    - Idle fuel flow for descent
+    """
     def __init__(self, actype: str, bada3_path: str, model: Optional[BADA3Model] = None):
         super().__init__(actype)
         # Ensure CasADi context (numpy/aero overrides) if available
@@ -292,6 +300,16 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         except Exception:
             pass
 
+        if not hasattr(self, "sci") or self.sci is None or not hasattr(self, "aero") or self.aero is None:
+            import numpy as _np
+            import importlib
+
+            self.sci = _np
+            try:
+                self.aero = importlib.import_module("openap.extra.aero")
+            except ModuleNotFoundError as exc:  # pragma: no cover
+                raise ImportError("openap.extra.aero is required for BADA3 fuel flow calculations") from exc
+
         _require_bada3()
         self.actype = actype.upper()
         self._model = model or load_model(actype, bada3_path)
@@ -299,21 +317,30 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         self._ff.sci = self.sci
         self._ff.aero = self.aero
 
-        # Cache coefficients — mirrors addon fields
+        # Cache coefficients — matches Bluesky BADA naming
         data = self._model.data
-        # Drag polar for required-thrust
+        # Drag polar for thrust calculation
         self._cd0_cr = data["CD0"]["CR"]
         self._k_cr   = data["CD2"]["CR"]
         self._S      = data["wing"]["area"]
 
-        # Engine and fuel coefficients
+        # Engine and fuel coefficients (Bluesky notation: Cf1, Cf2, Cf3, Cf4, Cf_cruise)
         self.engine_type = data["engine"]["type"]
-        self._Cf0, self._Cf1 = data["Cf"]                # cf1, cf2 in addon naming
-        self._CfDes0, self._CfDes1 = data["CfDes"]       # cf3, cf4
-        self._CfCrz  = data.get("CfCrz", 1.0)            # cfcr (cruise correction)
-        self._Ct0, self._Ct1, self._Ct2, self._Ct3, self._Ct4 = data["Ct"]  # thrust climb coeffs
+        self._Cf1, self._Cf2 = data["Cf"]                # Thrust-specific fuel consumption coeffs
+        self._Cf3, self._Cf4 = data["CfDes"]             # Idle fuel consumption coeffs
+        self._Cf2 = max(self._Cf2, 1e-6)
+        self._Cf4 = max(self._Cf4, 1e-6)
+        self._Cf_cruise  = data.get("CfCrz", 1.0)        # Cruise correction factor
+        
+        # Thrust coefficients for max thrust calculation
+        self._Ct0, self._Ct1, self._Ct2, self._Ct3, self._Ct4 = data["Ct"]
 
         self._g = 9.81
+        
+        # Vertical speed threshold for determining level cruise (ft/min)
+        # Bluesky uses phase flags; we approximate with vs threshold
+        self._vs_threshold_ftmin = 50.0  # ~0.25 m/s
+        
         self._symbolic_func_enroute = None
         self._symbolic_func_nominal = None
 
@@ -323,9 +350,10 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
                 return True
         return False
 
-    # --- symbolic building blocks ---
+    # --- Bluesky-style fuel flow components ---
 
     def _drag_clean_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0):
+        """Calculate drag force [N] in clean configuration."""
         tas = tas_kt * kts
         alt = alt_ft * ft
         rho = self.aero.density(alt)
@@ -340,8 +368,15 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         D  = q * self._S * CD
         return D
 
-    def _thrust_climb_symbolic(self, tas_kt, alt_ft, dT=0):
-        # BADA3 climb thrust (eq. 3.7) with engine-type branches
+    def _thrust_required_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, acc=0):
+        """Calculate required thrust [N] for current flight condition."""
+        D = self._drag_clean_symbolic(mass, tas_kt, alt_ft, vs_ftmin)
+        gamma = self.sci.arctan2(vs_ftmin * fpm, tas_kt * kts)
+        T_required = D + mass * self._g * self.sci.sin(gamma) + mass * acc
+        return T_required
+
+    def _thrust_max_symbolic(self, tas_kt, alt_ft, dT=0):
+        """Calculate maximum available thrust [N] (climb rating)."""
         if self.engine_type == "turbofan":
             thr_isa = self._Ct0 * (1 - alt_ft / self._Ct1 + self._Ct2 * alt_ft**2)
         elif self.engine_type == "turboprop":
@@ -349,66 +384,111 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         elif self.engine_type in ("piston", "electric"):
             thr_isa = self._Ct0 * (1 - alt_ft / self._Ct1) + self._Ct2 / self.sci.maximum(tas_kt, 1e-6)
         else:
-            # Fallback to turbofan shape if unknown
             thr_isa = self._Ct0 * (1 - alt_ft / self._Ct1 + self._Ct2 * alt_ft**2)
 
-        # Temperature deviation correction and limits (eq. 3.7.4–3.7.7)
+        # Temperature deviation correction
         dT_eff = dT - self._Ct3
         c_tc5  = self.sci.maximum(self._Ct4, 0.0)
         dT_lim = self.sci.maximum(0.0, self.sci.minimum(c_tc5 * dT_eff, 0.4))
         return thr_isa * (1 - dT_lim)
 
-    def _idle_symbolic(self, alt_ft):
-        # BADA3 idle fuel (kg/min) then convert to kg/s
-        if self.engine_type in ("turbofan", "turboprop"):
-            f_min = self._CfDes0 * (1 - alt_ft / self._CfDes1)
-        elif self.engine_type in ("piston", "electric"):
-            f_min = self._CfDes0
-        else:
-            f_min = self._CfDes0
-        return f_min / 60.0
-
-    def _eta_turbofan(self, tas_kt):
-        # eta in kg/(N*min); addon divides by 60 later
-        return (self._Cf0 * (1 + tas_kt / self._Cf1)) * 1e-3
-
-    def _eta_turboprop(self, tas_kt):
-        # addon: eta = cf1 * (1 - tas/cf2) * (tas/1e3) * 1e-3
-        return (self._Cf0 * (1 - tas_kt / self._Cf1) * (tas_kt / 1e3)) * 1e-3
-
-    def _nominal_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, acc=0, dT=0):
-        # Required thrust with climb-thrust cap and idle floor
-        D     = self._drag_clean_symbolic(mass, tas_kt, alt_ft, vs_ftmin)
-        gamma = self.sci.arctan2(vs_ftmin * fpm, tas_kt * kts)
-        T_dem = D + mass * self._g * self.sci.sin(gamma) + mass * acc
-        T_cap = self._thrust_climb_symbolic(tas_kt, alt_ft, dT)
-        T     = self.sci.minimum(T_dem, T_cap)
-
+    def _thrust_specific_fuel_consumption(self, tas_kt):
+        """
+        Calculate thrust-specific fuel consumption eta [kg/(N*min)].
+        
+        Bluesky BADA implementation:
+        - Turbofan (jet): eta = Cf1 * (1 + tas/Cf2) * 1e-3
+        - Turboprop: eta = Cf1 * (1 - tas/Cf2) * (tas/1000) * 1e-3
+        - Piston: eta = Cf1 (constant)
+        """
         if self.engine_type == "turbofan":
-            eta = self._eta_turbofan(tas_kt)
-            f_nom_minute = eta * T                   # kg/min
-            f_nom = f_nom_minute / 60.0              # kg/s
+            # Bluesky: eta = Cf1 * (1 + tas_kts / Cf2) in units that give kg/min
+            eta = self._Cf1 * (1 + tas_kt / self._Cf2) * 1e-3
         elif self.engine_type == "turboprop":
-            eta = self._eta_turboprop(tas_kt)
-            f_nom_minute = eta * T
-            f_nom = f_nom_minute / 60.0
+            # Bluesky: eta = Cf1 * (1 - tas_kts/Cf2) * (tas_kts/1000) * 1e-3
+            factor = self.sci.maximum(1 - tas_kt / self._Cf2, 0.0)
+            eta = self._Cf1 * factor * (tas_kt / 1000.0) * 1e-3
         elif self.engine_type in ("piston", "electric"):
-            # addon uses cf1 as constant (kg/min), convert to kg/s
-            f_nom = self._Cf0 / 60.0
+            # Piston: constant fuel flow per unit thrust
+            eta = self._Cf1 * 1e-3
         else:
-            # Safe fallback
-            eta = self._eta_turbofan(tas_kt)
-            f_nom = (eta * T) / 60.0
+            # Fallback to turbofan
+            eta = self._Cf1 * (1 + tas_kt / self._Cf2) * 1e-3
+        return eta
 
-        # Idle floor
-        f_idle = self._idle_symbolic(alt_ft)
-        return self.sci.maximum(f_nom, f_idle)
+    def _idle_fuel_symbolic(self, alt_ft):
+        """
+        Calculate idle fuel flow [kg/s].
+        
+        Bluesky BADA implementation:
+        - Turbofan/Turboprop: fmin = Cf3 * (1 - alt_ft/Cf4) [kg/min]
+        - Piston: fmin = Cf3 [kg/min]
+        Then convert to kg/s by dividing by 60.
+        """
+        if self.engine_type in ("turbofan", "turboprop"):
+            f_idle_kgmin = self._Cf3 * (1 - alt_ft / self._Cf4)
+        elif self.engine_type in ("piston", "electric"):
+            f_idle_kgmin = self._Cf3
+        else:
+            f_idle_kgmin = self._Cf3 * (1 - alt_ft / self._Cf4)
+        
+        # Convert from kg/min to kg/s
+        return f_idle_kgmin / 60.0
 
-    def _enroute_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, acc=0, dT=0):
-        # Cruise enroute fuel = cfcr * nominal
-        return self._CfCrz * self._nominal_symbolic(mass, tas_kt, alt_ft, vs_ftmin, acc, dT)
+    def _thrust_based_fuel_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, acc=0, dT=0):
+        """
+        Calculate thrust-based fuel flow [kg/s].
+        
+        Bluesky BADA: f = eta * Thrust [kg/min], then convert to kg/s.
+        Thrust is capped at maximum available thrust.
+        """
+        T_required = self._thrust_required_symbolic(mass, tas_kt, alt_ft, vs_ftmin, acc)
+        T_max = self._thrust_max_symbolic(tas_kt, alt_ft, dT)
+        
+        # Cap thrust at maximum available
+        T_actual = self.sci.minimum(T_required, T_max)
+        
+        # Apply TSFC to get fuel flow in kg/min
+        eta = self._thrust_specific_fuel_consumption(tas_kt)
+        f_kgmin = eta * T_actual
+        
+        # Convert to kg/s
+        return f_kgmin / 60.0
+
+    def _bluesky_fuel_flow_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, acc=0, dT=0):
+        """
+        Bluesky-style fuel flow calculation with phase logic.
+        
+        Phase determination (approximated from vertical speed):
+        - Climbing: vs > threshold -> thrust-based fuel
+        - Level cruise: |vs| <= threshold -> cruise-corrected fuel (Cf_cruise * thrust-based)
+        - Descending: vs < -threshold -> idle fuel
+        """
+        # Calculate base fuel flows
+        f_thrust = self._thrust_based_fuel_symbolic(mass, tas_kt, alt_ft, vs_ftmin, acc, dT)
+        f_idle = self._idle_fuel_symbolic(alt_ft)
+        
+        # Apply cruise correction for level flight
+        # In Bluesky: fcr = Cf_cruise * f (only during level cruise)
+        f_cruise = self._Cf_cruise * f_thrust
+        
+        # For symbolic: blend based on phase indicators
+        # Descent uses idle, climb uses thrust-based, level uses cruise-corrected      
+        vs_threshold = self._vs_threshold_ftmin
+        ff = ca.if_else(
+                vs_ftmin < -vs_threshold,
+                f_idle,
+                ca.if_else(ca.fabs(vs_ftmin) <= vs_threshold, f_cruise, f_thrust),
+        )
+        return ff
+
 
     def enroute(self, mass: Any, tas_kt: Any, alt_ft: Any, vs: Any = 0, acc: Any = 0, dT: Any = 0, **kwargs):
+        """
+        Enroute fuel flow following Bluesky BADA logic.
+        
+        This is the primary method used by the optimizer for cruise optimization.
+        """
         if self._is_symbolic(mass, tas_kt, alt_ft, vs, acc, dT):
             if self._symbolic_func_enroute is None:
                 m  = ca.MX.sym("mass")
@@ -417,9 +497,9 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
                 vz = ca.MX.sym("vs")
                 ac = ca.MX.sym("acc")
                 tD = ca.MX.sym("dT")
-                ff_expr = self._enroute_symbolic(m, v, h, vz, ac, tD)
+                ff_expr = self._bluesky_fuel_flow_symbolic(m, v, h, vz, ac, tD)
                 self._symbolic_func_enroute = ca.Function(
-                    "bada3_ff_enroute",
+                    "bada3_ff_enroute_bluesky",
                     [m, v, h, vz, ac, tD],
                     [ff_expr],
                     ["mass","tas","alt","vs","acc","dT"],
@@ -427,9 +507,13 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
                 )
             return self._symbolic_func_enroute(mass, tas_kt, alt_ft, vs, acc, dT)
         else:
+            # For numeric evaluation, use the original addon or compute directly
             return self._ff.enroute(mass, tas_kt, alt_ft, vs)
 
     def nominal(self, mass: Any, tas_kt: Any, alt_ft: Any, vs: Any = 0, acc: Any = 0, dT: Any = 0, **kwargs) -> Any:
+        """
+        Nominal fuel flow (same as enroute for Bluesky BADA).
+        """
         if self._is_symbolic(mass, tas_kt, alt_ft, vs, acc, dT):
             if self._symbolic_func_nominal is None:
                 m  = ca.MX.sym("mass")
@@ -438,9 +522,9 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
                 vz = ca.MX.sym("vs")
                 ac = ca.MX.sym("acc")
                 tD = ca.MX.sym("dT")
-                ff_expr = self._nominal_symbolic(m, v, h, vz, ac, tD)
+                ff_expr = self._bluesky_fuel_flow_symbolic(m, v, h, vz, ac, tD)
                 self._symbolic_func_nominal = ca.Function(
-                    "bada3_ff_nominal",
+                    "bada3_ff_nominal_bluesky",
                     [m, v, h, vz, ac, tD],
                     [ff_expr],
                     ["mass","tas","alt","vs","acc","dT"],
@@ -450,7 +534,9 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         return self._ff.nominal(mass, tas_kt, alt_ft, vs)
 
     def idle(self, mass: Any, tas_kt: Any, alt_ft: Any, **kwargs) -> Any:
-        # Numeric idle is fine; add symbolic when needed by the optimizer
+        """Idle fuel flow."""
+        if self._is_symbolic(alt_ft):
+            return self._idle_fuel_symbolic(alt_ft)
         return self._ff.idle(mass, tas_kt, alt_ft)
 
 
