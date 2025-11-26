@@ -155,7 +155,7 @@ class CompleteFlight(Base):
         ubw.append(self.x_0_ub)
         w0.append(self.x_guess[0])
         X.append(Xk)
-
+            
         # Formulate the NLP
         for k in range(self.nodes):
             # New NLP variable for the control
@@ -231,34 +231,89 @@ class CompleteFlight(Base):
         ubw.append([ca.inf])
         w0.append([7200])
 
-        # constrain altitude during cruise for long cruise flights
+        # ============================================================
+        # PHASE CONSTRAINTS: Unified climb/cruise/descent boundaries
+        # ============================================================
+        
+        # Calculate phase boundaries based on distance (more realistic for long flights)
+        # Typical climb: ~200-300 NM (~400-550 km), descent: ~100-150 NM (~200-300 km)
+        max_climb_range = 400_000   # 400 km for climb
+        max_descent_range = 300_000  # 300 km for descent
+        
+        dd = self.range / (self.nodes + 1)  # distance per node
+        
+        # Use distance-based indices for long flights, percentage for short flights
         if self.range > 1500_000:
-            dd = self.range / (self.nodes + 1)
-            max_climb_range = 500_000
-            max_descent_range = 300_000
-            idx_toc = int(max_climb_range / dd)
-            idx_tod = int((self.range - max_descent_range) / dd)
+            idx_toc = int(max_climb_range / dd)       # Top of climb index
+            idx_tod = int((self.range - max_descent_range) / dd)  # Top of descent index
+        else:
+            # For shorter flights, use percentage-based
+            idx_toc = int(self.nodes * 0.15)
+            idx_tod = int(self.nodes * 0.85)
+        
+        # Ensure valid indices
+        idx_toc = max(3, min(idx_toc, self.nodes // 3))  # At least 3 nodes, max 1/3 of flight
+        idx_tod = max(idx_toc + 5, min(idx_tod, self.nodes - 3))  # At least 5 nodes after TOC
+        
+        h_cruise_min = 25000 * ft  # Minimum cruise altitude (~FL250)
+        
+        if self.debug:
+            print(f"Phase boundaries: TOC at node {idx_toc}, TOD at node {idx_tod} (of {self.nodes})")
 
-            for k in range(idx_toc, idx_tod):
-                # minimum avoid large changes in altitude
-                g.append(U[k][1])
-                lbg.append([-500 * fpm])
-                ubg.append([500 * fpm])
+        # ----- CLIMB PHASE (0 to idx_toc) -----
+        for k in range(0, idx_toc):
+            # Force positive vertical rate during climb
+            g.append(U[k][1])
+            lbg.append([0])
+            ubg.append([ca.inf])
 
-                # minimum cruise alt FL150
-                g.append(X[k][2])
-                lbg.append([15000 * ft])
-                ubg.append([ca.inf])
+        # ----- CRUISE PHASE (idx_toc to idx_tod) -----
+        for k in range(idx_toc, idx_tod):
+            # Minimum cruise altitude
+            g.append(X[k][2] - h_cruise_min)
+            lbg.append([0])
+            ubg.append([ca.inf])
+            
+            # Limit vertical rate changes during cruise (smooth flight)
+            g.append(U[k][1])
+            lbg.append([-500 * fpm])
+            ubg.append([500 * fpm])
 
-            for k in range(0, idx_toc):
-                g.append(U[k][1])
-                lbg.append([0])
-                ubg.append([ca.inf])
+        # ----- DESCENT PHASE (idx_tod to end) -----
+        for k in range(idx_tod, self.nodes):
+            # Force negative vertical rate during descent
+            g.append(U[k][1])
+            lbg.append([-ca.inf])
+            ubg.append([0])
 
-            for k in range(idx_tod, self.nodes):
-                g.append(U[k][1])
-                lbg.append([-ca.inf])
-                ubg.append([0])
+        # constrain altitude during cruise for long cruise flights
+        # if self.range > 1500_000:
+        #     dd = self.range / (self.nodes + 1)
+        #     max_climb_range = 500_000
+        #     max_descent_range = 300_000
+        #     idx_toc = int(max_climb_range / dd)
+        #     idx_tod = int((self.range - max_descent_range) / dd)
+
+        #     for k in range(idx_toc, idx_tod):
+        #         # minimum avoid large changes in altitude
+        #         g.append(U[k][1])
+        #         lbg.append([-500 * fpm])
+        #         ubg.append([500 * fpm])
+
+        #         # minimum cruise alt FL150
+        #         g.append(X[k][2])
+        #         lbg.append([15000 * ft])
+        #         ubg.append([ca.inf])
+
+        #     for k in range(0, idx_toc):
+        #         g.append(U[k][1])
+        #         lbg.append([0])
+        #         ubg.append([ca.inf])
+
+        #     for k in range(idx_tod, self.nodes):
+        #         g.append(U[k][1])
+        #         lbg.append([-ca.inf])
+        #         ubg.append([0])
 
         # force and energy constraint
         for k in range(self.nodes):

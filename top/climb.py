@@ -34,7 +34,18 @@ class Climb(Base):
         h_min = 100 * ft
         h_toc = df_cruise.h.iloc[0]
         cruise_mach = df_cruise.mach.iloc[0]
-        self.traj_range = self.wrap.climb_range()["maximum"] * 1000 * 1.5
+
+        # BADA3-compatible: fallback when WRAP is not available
+        if self.wrap is not None:
+            self.traj_range = self.wrap.climb_range()["maximum"] * 1000 * 1.5
+        else:
+            # Estimate climb range: ~200-300 NM typical, use 250 NM * 1.5 safety factor
+            # Or derive from ceiling and typical climb gradient (~3°)
+            ceiling_m = self.aircraft.get("ceiling", 12000)  # meters
+            climb_gradient_rad = np.radians(3)  # ~3° typical climb
+            self.traj_range = (ceiling_m / np.tan(climb_gradient_rad)) * 1.5
+            if self.debug:
+                print(f"BADA3 mode: estimated climb range = {self.traj_range/1000:.1f} km")
 
         # Initial conditions - Lower and upper bounds
         self.x_0_lb = self.x_0_ub = [xp_0, yp_0, h_min, mass_0, 0]

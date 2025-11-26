@@ -256,16 +256,28 @@ class BADA3ThrustAdapter:
         dT_lim = self.sci.maximum(0.0, self.sci.minimum(c_tc5 * dT_eff, 0.4))
         return thr_isa * (1 - dT_lim)
 
-    def climb(self, tas_kt: Any, alt_ft: Any, dT: Any = 0) -> Any:
+    def climb(self, tas_kt: Any, alt_ft: Any, vs: Any = 0, dT: Any = 0) -> Any:
+        """Maximum climb thrust (vs is ignored, for OpenAP API compatibility)."""
         if self._is_symbolic(tas_kt, alt_ft, dT):
             return self._thrust_climb_symbolic(tas_kt, alt_ft, dT)
         return self._thr.climb(tas_kt, alt_ft, dT=dT)
 
-    def cruise(self, tas_kt: Any, alt_ft: Any, dT: Any = 0) -> Any:
-        # BADA3 eq. (3.7-8): 0.95 * climb
+    def cruise(self, tas_kt: Any, alt_ft: Any, vs: Any = 0, dT: Any = 0) -> Any:
+        """Cruise thrust: 0.95 * climb (vs is ignored, for OpenAP API compatibility)."""
         if self._is_symbolic(tas_kt, alt_ft, dT):
             return 0.95 * self._thrust_climb_symbolic(tas_kt, alt_ft, dT)
         return self._thr.cruise(tas_kt, alt_ft, dT=dT)
+    
+    # def climb(self, tas_kt: Any, alt_ft: Any, dT: Any = 0) -> Any:
+    #     if self._is_symbolic(tas_kt, alt_ft, dT):
+    #         return self._thrust_climb_symbolic(tas_kt, alt_ft, dT)
+    #     return self._thr.climb(tas_kt, alt_ft, dT=dT)
+
+    # def cruise(self, tas_kt: Any, alt_ft: Any, dT: Any = 0) -> Any:
+    #     # BADA3 eq. (3.7-8): 0.95 * climb
+    #     if self._is_symbolic(tas_kt, alt_ft, dT):
+    #         return 0.95 * self._thrust_climb_symbolic(tas_kt, alt_ft, dT)
+    #     return self._thr.cruise(tas_kt, alt_ft, dT=dT)
 
     def descent_idle(self, tas_kt: Any, alt_ft: Any, dT: Any = 0, config: str = "CR") -> Any:
         if config not in ("CR", "AP", "LD"):
