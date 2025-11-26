@@ -9,10 +9,19 @@ __pycache__/
 # C extensions
 *.so
 
-top/perf/data
-
+# meta data
 *.json
 *.pkl
+
+# data/ bada files
+/perf/data/**
+*.OPF
+*.PTF
+*.APF
+*.PTD
+*.GPF
+*ReleaseSummary
+*SYNONYM.NEW
 
 # Distribution / packaging
 .Python

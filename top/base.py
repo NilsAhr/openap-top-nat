@@ -11,6 +11,9 @@ import pandas as pd
 from openap.extra.aero import fpm, ft, kts
 from pyproj import Proj
 
+# bada3_adapter import
+from .perf import make_bada3_backend
+
 try:
     from . import tools
 except:
@@ -23,9 +26,12 @@ class Base:
         actype: str,
         origin: Union[str, tuple],
         destination: Union[str, tuple],
-        m0: float = 0.8,
+        m0: float = 0.95,
         dT: float = 0.0,
         use_synonym=False,
+        perf_model: str = "openap",
+        bada3_path: str | None = None,
+        debug: bool = False,
     ):
         """OpenAP trajectory optimizer.
 
@@ -33,43 +39,111 @@ class Base:
             actype (str): ICAO aircraft type code
             origin (Union[str, tuple]): ICAO or IATA code of airport, or tuple (lat, lon)
             destination (Union[str, tuple]): ICAO or IATA code of airport, or tuple (lat, lon)
-            m0 (float, optional): Takeoff mass factor. Defaults to 0.8 (of MTOW).
+            m0 (float, optional): Takeoff mass factor. Defaults to 0.95 (of MTOW).
             dT (float, optional): Temperature shift from standard ISA. Default = 0
+            use_synonym (bool, optional): Use aircraft synonym database to find similar aircraft if actype is not found. Defaults to False.
+            perf_model (str, optional): Performance model to use ('openap' or 'bada3'). Defaults to 'openap'.
+            bada3_path (str, optional): Path to BADA3 performance data files. Required if perf_model is 'bada3'. Defaults to None.
         """
+
+        self.debug = debug
+
+        # Validate performance model
+        if perf_model not in ["openap", "bada3"]:
+            raise ValueError("perf_model must be either 'openap' or 'bada3'")
+
+        if perf_model == "bada3" and bada3_path is None:
+            raise ValueError("bada3_path must be provided when using BADA3 performance model")
+
+        self.perf_model = perf_model
+        self.bada3_path = bada3_path
+
+        #print(f"Debug - origin: {origin}, type: {type(origin)}, isinstance(str): {isinstance(origin, str)}")
+        # ORIGIN airport data
         if isinstance(origin, str):
             ap1 = openap.nav.airport(origin)
             self.lat1, self.lon1 = ap1["lat"], ap1["lon"]
+            #print(f"Debug - airport data: lat={self.lat1}, lon={self.lon1}")
         else:
+            #print(f"Debug - treating as coordinates: {origin}")
             self.lat1, self.lon1 = origin
 
+        #print(f"Debug - destination: {destination}, type: {type(destination)}")
+        # DESTINATION airport data
         if isinstance(destination, str):
             ap2 = openap.nav.airport(destination)
             self.lat2, self.lon2 = ap2["lat"], ap2["lon"]
         else:
             self.lat2, self.lon2 = destination
 
+        # aircraft data
         self.actype = actype
-        self.aircraft = oc.prop.aircraft(self.actype, use_synonym=use_synonym)
-        self.engtype = self.aircraft["engine"]["default"]
-        self.engine = oc.prop.engine(self.aircraft["engine"]["default"])
 
+        if self.perf_model.lower() == "bada3":
+            # Import BADA3 here to avoid circular imports
+            from .perf.bada3_adapter import load_model
+            
+            try:
+                # Use the encoding-safe loader from bada3_adapter
+                bada3_model = load_model(self.actype, self.bada3_path)
+                bada3_aircraft_data = bada3_model.data
+                self.aircraft = self._create_aircraft_from_bada3(bada3_aircraft_data)
+                
+                # Fill missing fields with OpenAP data if available
+                try:
+                    openap_aircraft = oc.prop.aircraft(self.actype, use_synonym=use_synonym)
+                    self._fill_missing_aircraft_data(openap_aircraft)
+                except Exception:
+                    pass
+            except Exception as e:
+                raise RuntimeError(f"Failed to load BADA3 data for {actype}: {e}")
+        else:
+            # Standard OpenAP mode
+            self.aircraft = oc.prop.aircraft(self.actype, use_synonym=use_synonym)
+
+        # Engine setup - simplified for BADA3
+        if self.perf_model.lower() == "bada3":
+            # BADA3 uses aircraft-level performance
+            self.engtype = self.aircraft["engine"]["type"] # "turbofan", "turboprop", etc.
+            self.engine = {
+                "name": self.engtype,
+                "type": self.aircraft["engine"]["type"],
+                "number": self.aircraft["engine"]["number"]
+            }
+        else:
+            # OpenAP engine validation and loading
+            self.engtype = self.aircraft["engine"]["default"] # "CFM56-7B24", etc.
+            self.engine = oc.prop.engine(self.aircraft["engine"]["default"])
+
+        # Initialize aircraft parameters from the aircraft dict
         self.mass_init = m0 * self.aircraft["mtow"]
         self.oew = self.aircraft["oew"]
-        self.mlw = self.aircraft["mlw"]
-        self.fuel_max = self.aircraft["mfc"]
-        self.mach_max = self.aircraft["mmo"]
+        self.mlw = self.aircraft.get("mlw", self.aircraft["mtow"])  # fallback
+        self.fuel_max = self.aircraft.get("mfc", self.aircraft["mtow"] - self.aircraft["oew"])  # fallback
+        self.mach_max = self.aircraft.get("mmo", 0.85)  # fallback
         self.dT = dT
-
         self.use_synonym = use_synonym
 
-        self.thrust = oc.Thrust(actype, use_synonym=self.use_synonym)
-        self.wrap = openap.WRAP(actype, use_synonym=self.use_synonym)
-        self.drag = oc.Drag(actype, wave_drag=True, use_synonym=self.use_synonym)
-        self.fuelflow = oc.FuelFlow(
-            actype, wave_drag=True, use_synonym=self.use_synonym
-        )
-        self.emission = oc.Emission(actype, use_synonym=self.use_synonym)
+        # Performance model initialization
+        if self.perf_model.lower() == "bada3":
 
+            self.thrust, self.drag, self.fuelflow, _ = make_bada3_backend(
+                self.actype, self.bada3_path
+            )
+            # For BADA3, we don't have WRAP or Emission models
+            self.wrap = None
+            self.emission = None
+        else:
+            # Existing OpenAP behavior
+            self.thrust = oc.Thrust(actype, use_synonym=self.use_synonym)
+            self.wrap = openap.WRAP(actype, use_synonym=self.use_synonym)
+            self.drag = oc.Drag(actype, wave_drag=True, use_synonym=self.use_synonym)
+            self.fuelflow = oc.FuelFlow(actype, wave_drag=True, use_synonym=self.use_synonym)
+            self.emission = oc.Emission(actype, use_synonym=self.use_synonym)
+
+        ########
+        # Test coordinate projection
+        ########
         # self.proj = Proj(
         #     proj="lcc",
         #     ellps="WGS84",
@@ -83,12 +157,110 @@ class Base:
 
         # Check cruise range
         self.range = oc.aero.distance(self.lat1, self.lon1, self.lat2, self.lon2)
-        max_range = self.wrap.cruise_range()["maximum"] * 1.2
-        if self.range > max_range * 1000:
-            warnings.warn("The destination is likely out of maximum cruise range.")
-
-        self.debug = False
+        if self.wrap is not None:  # Add this check
+            max_range = self.wrap.cruise_range()["maximum"] * 1.2
+            if self.range > max_range * 1000:
+                warnings.warn("The destination is likely out of maximum cruise range.")
+        else:
+            # For BADA3, we don't have WRAP, so skip range check or implement BADA3 range check
+            if self.debug:
+                print("Cruise range check skipped for BADA3 mode (WRAP not available)")
         self.setup()
+
+    def _create_aircraft_from_bada3(self, bada3_data: dict) -> dict:
+        """Create aircraft dictionary from BADA3 data with OpenAP structure"""
+        # Calculate derived parameters
+        mtow = bada3_data["mtow"]
+        oew = bada3_data["oew"]
+        mpl = bada3_data["mpl"]
+        
+        # Calculate MFC using MTOW-based proxy
+        alpha = 0.28 if mtow / 1000 < 100 else (0.38 if mtow / 1000 < 200 else 0.48)
+        mfc_proxy = alpha * mtow
+        mfc_structural_limit = mtow - oew  # Structural limit (no payload)
+        mfc = min(mfc_proxy, mfc_structural_limit)
+        
+        # Calculate other mass parameters
+        mlw = oew + mpl  # Maximum Landing Weight
+        mzfw = oew + mpl  # Maximum Zero Fuel Weight
+
+        aircraft = {
+            # Mass parameters
+            "mtow": mtow,  # already in kg
+            "oew": oew,    # already in kg
+            "mpl": mpl,    # already in kg
+            "mzfw": mzfw,  # OEW + max payload
+
+            # Flight envelope
+            "mmo": bada3_data["mmo"],
+            "vmo": bada3_data["vmo"],
+            "ceiling": bada3_data["ceiling"], # in meters
+            
+            # Geometry
+            "wing": {
+                "area": bada3_data["wing"]["area"],
+                "span": bada3_data["wing"]["span"],
+            },
+            "fuselage": {
+                "length": bada3_data["fuselage"]["length"], 
+            },
+            
+            # Engine
+            "engine": {
+                "type": bada3_data["engine"]["type"],
+                "number": bada3_data["engine"]["number"],
+                "default": bada3_data['engine']['type'],
+            },
+            
+            # Cruise parameters
+            "cruise": {
+                "height": bada3_data["ceiling"],  # already converted to meters
+            },
+            "limits": {
+                "MTOW": mtow,           # kg
+                "OEW": oew,             # kg
+                "MLW": mlw,             # OEW + max payload
+                "MZFW": mzfw,           # OEW + max payload
+                "MFC_lower": mtow - (oew + mpl),  # lower bound MTOW - MZFW
+                "MFC_upper": mtow - oew,  # upper bound MTOW - OEW
+                # max fuel capacity (proxy based on MTOW fraction)
+                "MFC": mfc,               # kg  
+                "VMO": bada3_data["vmo"],             # knots
+                "MMO": bada3_data["mmo"],             # Mach
+                "ceiling": bada3_data["ceiling"],     # meters, h(altitude - state variable treat in meters)
+            }
+
+        }
+        
+        return aircraft
+
+    def _fill_missing_aircraft_data(self, openap_aircraft: dict):
+        """Fill missing aircraft data with OpenAP values where BADA3 data is incomplete"""
+        
+        # List of fields that might be missing in BADA3 but available in OpenAP
+        openap_fields = [
+            "limits", "flaps", "gear", "approach", "landing", 
+            "takeoff", "climb", "descent", "service"
+        ]
+        
+        for field in openap_fields:
+            if field in openap_aircraft and field not in self.aircraft:
+                self.aircraft[field] = openap_aircraft[field]
+        
+        # Fill missing engine data
+        if "engine" in openap_aircraft:
+            openap_engine = openap_aircraft["engine"]
+            if "default" not in self.aircraft["engine"] and "default" in openap_engine:
+                self.aircraft["engine"]["default"] = openap_engine["default"]
+            
+            # Add other engine parameters that might be missing
+            for eng_param in ["options", "max_thrust", "bypass_ratio"]:
+                if eng_param in openap_engine and eng_param not in self.aircraft["engine"]:
+                    self.aircraft["engine"][eng_param] = openap_engine[eng_param]
+        
+        # Fill missing performance limits if available
+        if "limits" in openap_aircraft:
+            self.aircraft.setdefault("limits", openap_aircraft["limits"])
 
     def proj(self, lon, lat, inverse=False, symbolic=False):
         lat0 = (self.lat1 + self.lat2) / 2
@@ -111,6 +283,7 @@ class Base:
             x, y = lon, lat
             if symbolic:
                 distances = ca.sqrt(x**2 + y**2)
+                #bearing = ca.atan2(x, y) * 180 / 3.14159
                 bearing = ca.arctan2(x, y) * 180 / 3.14159
                 lat, lon = oc.aero.latlon(lat0, lon0, distances, bearing)
             else:
@@ -122,7 +295,7 @@ class Base:
 
     def initial_guess(self, flight: pd.DataFrame = None):
         m_guess = self.mass_init * np.ones(self.nodes + 1)
-        ts_guess = np.linspace(0, 6 * 3600, self.nodes + 1)
+        ts_guess = np.linspace(0, 12 * 3600, self.nodes + 1)
 
         if flight is None:
             h_cr = self.aircraft["cruise"]["height"]
@@ -153,21 +326,32 @@ class Base:
 
     def change_engine(self, engtype):
         self.engtype = engtype
-        self.engine = oc.prop.engine(engtype)
-        self.thrust = oc.Thrust(
-            self.actype,
-            engtype,
-            use_synonym=self.use_synonym,
-            force_engine=True,
-        )
-        self.fuelflow = oc.FuelFlow(
-            self.actype,
-            engtype,
-            wave_drag=True,
-            use_synonym=self.use_synonym,
-            force_engine=True,
-        )
-        self.emission = oc.Emission(self.actype, engtype, use_synonym=self.use_synonym)
+        # bada3 case
+        if self.perf_model.lower() == "bada3":
+            # For BADA3, engine changes might not be supported
+            warnings.warn("Engine change with BADA3 performance model may not be fully supported")
+            # Try to update engine info in aircraft dict
+            try:
+                self.engine = oc.prop.engine(engtype)
+            except Exception:
+                self.engine = {"name": engtype, "type": "turbofan"}
+        else:
+            # Original OpenAP behavior
+            self.engine = oc.prop.engine(engtype)
+            self.thrust = oc.Thrust(
+                self.actype,
+                engtype,
+                use_synonym=self.use_synonym,
+                force_engine=True,
+            )
+            self.fuelflow = oc.FuelFlow(
+                self.actype,
+                engtype,
+                wave_drag=True,
+                use_synonym=self.use_synonym,
+                force_engine=True,
+            )
+            self.emission = oc.Emission(self.actype, engtype, use_synonym=self.use_synonym)
 
     def collocation_coeff(self):
         # Get collocation points using Legendre polynomials
@@ -218,6 +402,7 @@ class Base:
         mach, vs, psi = u[0], u[1], u[2]
 
         v = oc.aero.mach2tas(mach, h, dT=self.dT)
+        #gamma = ca.atan2(vs, v)
         gamma = ca.arctan2(vs, v)
 
         dx = v * ca.sin(psi) * ca.cos(gamma)
@@ -339,6 +524,8 @@ class Base:
         )
 
     def _calc_emission(self, x, u, symbolic=True):
+        if self.perf_model.lower() == "bada3":
+            raise NotImplementedError("Emission calculations not available with BADA3 performance model")
         xp, yp, h, m = x[0], x[1], x[2], x[3]
         mach, vs, psi = u[0], u[1], u[2]
 
@@ -365,23 +552,70 @@ class Base:
         return co2, h2o, sox, soot, nox
 
     def obj_fuel(self, x, u, dt, symbolic=True, **kwargs):
+        """
+        Fuel objective (kg) over one collocation interval.
+        x = [xp, yp, h, m, ts], u = [mach, vs, psi]
+        """
+        # unpack states and controls
         xp, yp, h, m, ts = x[0], x[1], x[2], x[3], x[4]
         mach, vs, psi = u[0], u[1], u[2]
 
+        # Choose aero conversion and fuelflow backend based on mode
         if symbolic:
-            fuelflow = self.fuelflow
+            # CasADi-safe conversions
             v = oc.aero.mach2tas(mach, h, dT=self.dT)
-        else:
-            fuelflow = openap.FuelFlow(
-                self.actype,
-                self.engtype,
-                use_synonym=self.use_synonym,
-                force_engine=True,
-            )
-            v = openap.aero.mach2tas(mach, h, dT=self.dT)
+            tas_kt = v / kts
+            alt_ft = h / ft
 
-        ff = fuelflow.enroute(m, v / kts, h / ft, vs / fpm, dT=self.dT)
+            if self.perf_model.lower() == "bada3":
+                fuelflow = self.fuelflow  # BADA3 adapter (symbolic-safe)
+            else:
+                fuelflow = oc.FuelFlow(
+                    self.actype,
+                    self.engtype,
+                    use_synonym=self.use_synonym,
+                    force_engine=True
+                    )
+
+        else:
+            # Numeric conversions
+            v = openap.aero.mach2tas(mach, h, dT=self.dT)
+            tas_kt = v / kts
+            alt_ft = h / ft
+
+            if self.perf_model.lower() == "bada3":
+                # Use the same BADA3 adapter for numeric pre-scaling too
+                fuelflow = self.fuelflow
+            else:
+                fuelflow = openap.FuelFlow(
+                    self.actype,
+                    self.engtype,
+                    use_synonym=self.use_synonym,
+                    force_engine=True
+                    )
+
+        # Fuel flow (kg/s), note our BADA3 adapter supports dT and numeric/symbolic inputs
+        ff = fuelflow.enroute(m, tas_kt, alt_ft, vs / fpm, dT=self.dT)
+
+        # Quadrature: fuel burned over interval = ff * dt
         return ff * dt
+    
+
+        # old
+        #if symbolic:
+        #    fuelflow = self.fuelflow
+        #    v = oc.aero.mach2tas(mach, h, dT=self.dT)
+        #else:
+        #    fuelflow = openap.FuelFlow(
+        #        self.actype,
+        #        self.engtype,
+        #        use_synonym=self.use_synonym,
+        #        force_engine=True,
+        #    )
+        #    v = openap.aero.mach2tas(mach, h, dT=self.dT)
+
+        #ff = fuelflow.enroute(m, v / kts, h / ft, vs / fpm, dT=self.dT)
+        #return ff * dt
 
     def obj_time(self, x, u, dt, **kwargs):
         return dt
@@ -527,8 +761,9 @@ class Base:
         return ratio * c1 / n1 + (1 - ratio) * c2 / n2
 
     def to_trajectory(self, ts_final, x_opt, u_opt):
-        X = x_opt.full()
-        U = u_opt.full()
+        # Extract optimized states and controls
+        X = x_opt.full()  # [xp, yp, h, mass, ts]
+        U = u_opt.full()  # [mach, vs, psi]
 
         # Extrapolate the final control point, Uf
         U2 = U[:, -2:-1]
@@ -544,10 +779,11 @@ class Base:
 
         xp, yp, h, mass, ts = X
         mach, vs, psi = U
-        lon, lat = self.proj(xp, yp, inverse=True)
+        # Convert to readable format
+        lon, lat = self.proj(xp, yp, inverse=True) # Convert back to lat/lon
         ts_ = np.linspace(0, ts_final, n).round(4)
-        tas = (openap.aero.mach2tas(mach, h, dT=self.dT) / kts).round(4)
-        alt = (h / ft).round()
+        tas = (openap.aero.mach2tas(mach, h, dT=self.dT) / kts).round(4) # Convert Mach to TAS
+        alt = (h / ft).round() # Convert to feet
         vertrate = (vs / fpm).round()
 
         df = pd.DataFrame(
@@ -567,20 +803,43 @@ class Base:
             )
         )
 
-        fuelflow = openap.FuelFlow(
-            self.actype,
-            self.engtype,
-            use_synonym=self.use_synonym,
-            force_engine=True,
-        )
-
-        df = df.assign(
-            fuelflow=(
-                fuelflow.enroute(
-                    mass=df.mass, tas=tas, alt=alt, vs=vertrate, dT=self.dT
-                )
+        # Handle fuel flow calculation based on performance model
+        if self.perf_model.lower() == "bada3":
+            # Use BADA3 fuel flow for trajectory output
+            ff_values = []
+            for i in range(len(df)):
+                try:
+                    ff = self.fuelflow.enroute(
+                        mass=df.iloc[i].mass, 
+                        tas_kt=df.iloc[i].tas, 
+                        alt_ft=df.iloc[i].altitude, 
+                        vs=df.iloc[i].vertical_rate
+                    )
+                    # Convert CasADi array to float if needed
+                    if hasattr(ff, 'full'):
+                        ff_values.append(float(ff.full().flatten()[0]))
+                    else:
+                        ff_values.append(float(ff))
+                except Exception as e:
+                    print(f"Warning: BADA3 fuel flow calculation failed at step {i}: {e}")
+                    ff_values.append(0.0)
+            
+            df = df.assign(fuelflow=ff_values)
+        else:
+            # Original OpenAP fuel flow calculation
+            fuelflow = openap.FuelFlow(
+                self.actype,
+                self.engtype,
+                use_synonym=self.use_synonym,
+                force_engine=True,
             )
-        )
+            df = df.assign(
+                fuelflow=(
+                    fuelflow.enroute(
+                        mass=df.mass, tas=tas, alt=alt, vs=vertrate, dT=self.dT
+                    )
+                )
+            )   
 
         if self.wind:
             wu = self.wind.calc_u(xp, yp, h, ts)
