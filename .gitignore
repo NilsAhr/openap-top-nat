@@ -9,6 +9,11 @@ __pycache__/
 # C extensions
 *.so
 
+top/perf/data
+
+*.json
+*.pkl
+
 # Distribution / packaging
 .Python
 build/
