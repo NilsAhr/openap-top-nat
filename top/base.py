@@ -800,6 +800,8 @@ class Base:
                 tas=tas,
                 vertical_rate=vertrate,
                 heading=(np.rad2deg(psi) % 360).round(4),
+                # new added psi for reuse in init condition
+                psi=psi,
             )
         )
 
