@@ -117,27 +117,6 @@ class Cruise(Base):
         if initial_guess is not None:
             self.x_guess = self.initial_guess(initial_guess)
 
-            # Also extract control guess from DataFrame
-            if all(col in initial_guess.columns for col in ["mach", "vertical_rate"]):
-                mach_guess = initial_guess.mach.values[:-1]  # N controls for N+1 states
-                vs_guess = initial_guess.vertical_rate.values[:-1] * fpm  # fpm -> m/s
-                
-                # For heading: use raw psi if available, otherwise compute from lat/lon
-                if "psi" in initial_guess.columns:
-                    # Use stored raw psi values (in radians)
-                    psi_guess = initial_guess.psi.values[:-1]
-                else:
-                    # Compute psi from consecutive lat/lon points
-                    lat = initial_guess.latitude.values
-                    lon = initial_guess.longitude.values
-                    # Bearing between consecutive points
-                    bearings = []
-                    for i in range(len(lat) - 1):
-                        brg = oc.aero.bearing(lat[i], lon[i], lat[i+1], lon[i+1])
-                        bearings.append(brg * np.pi / 180)
-                    psi_guess = np.array(bearings)
-                
-                self.u_guess_array = np.vstack([mach_guess, vs_guess, psi_guess]).T
         return_failed = kwargs.get("return_failed", False)
 
         C, D, B = self.collocation_coeff()
@@ -182,13 +161,7 @@ class Cruise(Base):
             else:
                 lbw.append(self.u_lb)
                 ubw.append(self.u_ub)
-            # old only state guess
-            # w0.append(self.u_guess)
-            # Use per-node control guess if available
-            if self.u_guess_array is not None:
-                w0.append(self.u_guess_array[k])
-            else:
-                w0.append(self.u_guess)
+            w0.append(self.u_guess)
 
             # State at collocation points
             Xc = []
