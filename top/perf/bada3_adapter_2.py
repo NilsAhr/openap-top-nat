@@ -104,7 +104,7 @@ def _load_model_with_synonym_fix(actype: str, bada3_path: str) -> BADA3Model:
         # Try loading with the converted files
         try:
             model = _bada3.load_bada3(actype, str(temp_path))
-            print(f"✓ Successfully loaded {actype} with fixed encoding")
+            #print(f"✓ Successfully loaded {actype} with fixed encoding")
             return BADA3Model(model)
         except Exception as load_error:
             raise ValueError(f"Failed to load {actype} even after encoding fix: {load_error}")

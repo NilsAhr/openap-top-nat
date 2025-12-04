@@ -109,6 +109,10 @@ class Cruise(Base):
 
         self.init_model(objective, **kwargs)
 
+        # Print performance model info
+        if self.debug:
+            print(f"Using performance model: {self.perf_model.upper()}")
+
         customized_max_fuel = kwargs.get("max_fuel", None)
 
         initial_guess = kwargs.get("initial_guess", None)

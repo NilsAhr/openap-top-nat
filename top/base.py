@@ -161,10 +161,10 @@ class Base:
             max_range = self.wrap.cruise_range()["maximum"] * 1.2
             if self.range > max_range * 1000:
                 warnings.warn("The destination is likely out of maximum cruise range.")
-        else:
-            # For BADA3, we don't have WRAP, so skip range check or implement BADA3 range check
-            if self.debug:
-                print("Cruise range check skipped for BADA3 mode (WRAP not available)")
+        # For BADA3, we don't have WRAP, so skip range check or implement BADA3 range check
+        # #else:  
+            #if self.debug:
+            #    print("Cruise range check skipped for BADA3 mode (WRAP not available)")
         self.setup()
 
     def _create_aircraft_from_bada3(self, bada3_data: dict) -> dict:
@@ -599,7 +599,6 @@ class Base:
 
         # Quadrature: fuel burned over interval = ff * dt
         return ff * dt
-    
 
         # old
         #if symbolic:
