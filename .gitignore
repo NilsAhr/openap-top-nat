@@ -13,6 +13,9 @@ __pycache__/
 *.json
 *.pkl
 
+# exclude scenario files
+*.scn
+
 # data/ bada files
 /perf/data/**
 *.OPF

@@ -81,7 +81,7 @@ class Base:
 
         if self.perf_model.lower() == "bada3":
             # Import BADA3 here to avoid circular imports
-            from .perf.bada3_adapter import load_model
+            from .perf import load_model
             
             try:
                 # Use the encoding-safe loader from bada3_adapter
