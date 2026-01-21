@@ -804,8 +804,23 @@ class Base:
         alt = (h / ft).round() # Convert to feet
         vertrate = (vs / fpm).round()
 
+        def _as_1d(arr, n=None):
+            if hasattr(arr, "full"):
+                arr = arr.full()
+            arr = np.asarray(arr).squeeze()
+            if arr.ndim == 0:
+                arr = np.full(n, float(arr)) if n is not None else np.array([float(arr)])
+            arr = arr.astype(float)
+            if n is not None and arr.size != n:
+                if arr.size == n - 1:
+                    arr = np.append(arr, np.nan)
+                else:
+                    raise ValueError(f"Unexpected array size {arr.size}, expected {n} or {n-1}")
+            return arr
+
         # Calculate fuel_cost per segment
         fuel_cost = self.obj_fuel(X, U, self.dt, symbolic=False)
+        fuel_cost = _as_1d(fuel_cost, n)
 
         # Calculate grid_cost per segment (NaN if no interpolant)
         if interpolant is not None:
@@ -818,6 +833,7 @@ class Base:
                 n_dim=n_dim,
                 symbolic=False,
             )
+            grid_cost = _as_1d(grid_cost, n)
         else:
             grid_cost = np.full(n, np.nan)
 
