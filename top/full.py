@@ -2,7 +2,6 @@ import warnings
 from math import pi
 
 import casadi as ca
-
 import numpy as np
 import openap
 import openap.casadi as oc
@@ -16,7 +15,7 @@ from .descent import Descent
 
 try:
     from . import tools
-except:
+except Exception:
     RuntimeWarning("cfgrib and sklearn are required for wind integration")
 
 
@@ -107,6 +106,8 @@ class CompleteFlight(Base):
                 usually a exsiting flight trajectory.
             - return_failed (bool): If True, returns the DataFrame even if the
                 optimization fails. Default is False.
+            - autoscale_cost (bool): If True, objective is scaled based on initial guess
+
 
         Returns:
         - pd.DataFrame: A DataFrame containing the optimized trajectory.
@@ -409,7 +410,8 @@ class CompleteFlight(Base):
         output = ca.Function("output", [w], [X, U], ["w"], ["x", "u"])
         x_opt, u_opt = output(self.solution["x"])
 
-        df = self.to_trajectory(ts_final, x_opt, u_opt)
+        df = self.to_trajectory(ts_final, x_opt, u_opt, **kwargs)
+
         df_copy = df.copy()
 
         # check if the optimizer has failed
@@ -562,3 +564,15 @@ class MultiPhase(Base):
         df_full = pd.concat([dfcl, dfcr, dfde], ignore_index=True)
 
         return df_full
+
+    def get_solver_stats(self):
+        """Get solver statistics for all phases.
+
+        Returns:
+            dict: Solver statistics for climb, cruise, and descent phases.
+        """
+        return {
+            "climb": self.climb.solver.stats(),
+            "cruise": self.cruise.solver.stats(),
+            "descent": self.descent.solver.stats(),
+        }

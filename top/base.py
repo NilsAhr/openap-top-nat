@@ -1,22 +1,20 @@
 import warnings
-from math import pi
 from typing import Callable, Union
 
 import casadi as ca
+import openap.casadi as oc
+from openap.extra.aero import fpm, ft, kts
 
 import numpy as np
 import openap
-import openap.casadi as oc
 import pandas as pd
-from openap.extra.aero import fpm, ft, kts
-from pyproj import Proj
 
 # bada3_adapter import
 from .perf import make_bada3_backend
 
 try:
     from . import tools
-except:
+except Exception:
     RuntimeWarning("cfgrib and sklearn are required for wind integration")
 
 
@@ -475,6 +473,8 @@ class Base:
             self.solver_options[f"ipopt.{key}"] = value
 
     def init_model(self, objective, **kwargs):
+        autoscale_cost = kwargs.get("auto_scale_cost", False)
+
         # Model variables
         xp = ca.MX.sym("xp")
         yp = ca.MX.sym("yp")
@@ -506,12 +506,13 @@ class Base:
 
         L = self.objective(self.x, self.u, self.dt, **kwargs)
 
-        # scale objective based on initial guess
-        x0 = self.x_guess.T
-        u0 = self.u_guess
-        dt0 = self.range / 200 / self.nodes
-        cost = np.sum(self.objective(x0, u0, dt0, symbolic=False, **kwargs))
-        L = L / cost * 1e3
+        if autoscale_cost:
+            # scale objective based on initial guess
+            x0 = self.x_guess.T
+            u0 = self.u_guess
+            dt0 = self.range / 200 / self.nodes
+            cost = np.sum(self.objective(x0, u0, dt0, symbolic=False, **kwargs))
+            L = L / cost * 1e3
 
         # Continuous time dynamics
         self.func_dynamics = ca.Function(
@@ -594,7 +595,7 @@ class Base:
                     force_engine=True
                     )
 
-        # Fuel flow (kg/s), note our BADA3 adapter supports dT and numeric/symbolic inputs
+        # Fuel flow (kg/s), note BADA3 adapter supports dT and numeric/symbolic inputs
         ff = fuelflow.enroute(m, tas_kt, alt_ft, vs / fpm, dT=self.dT)
 
         # Quadrature: fuel burned over interval = ff * dt
@@ -759,10 +760,28 @@ class Base:
 
         return ratio * c1 / n1 + (1 - ratio) * c2 / n2
 
-    def to_trajectory(self, ts_final, x_opt, u_opt):
-        # Extract optimized states and controls
-        X = x_opt.full()  # [xp, yp, h, mass, ts]
-        U = u_opt.full()  # [mach, vs, psi]
+    def to_trajectory(self, ts_final, x_opt, u_opt, **kwargs):
+        """Convert optimization results to a trajectory DataFrame.
+
+        Args:
+            ts_final: Final timestamp
+            x_opt: Optimized states
+            u_opt: Optimized controls
+            **kwargs: Additional arguments including:
+                - interpolant: Grid cost interpolant function
+                - time_dependent: Whether grid cost is time dependent (default True)
+                - n_dim: Dimension of grid cost, 3 or 4 (default 4)
+
+        Returns:
+            pd.DataFrame: Trajectory with columns including fuel_cost and grid_cost
+        """
+        interpolant = kwargs.get("interpolant", None)
+        time_dependent = kwargs.get("time_dependent", True)
+        n_dim = kwargs.get("n_dim", 4)
+
+        # Extract optimised states and controls
+        X = x_opt.full() # [xp, yp, h, mass, ts]
+        U = u_opt.full() # [mach, vs, psi]
 
         # Extrapolate the final control point, Uf
         U2 = U[:, -2:-1]
@@ -785,6 +804,23 @@ class Base:
         alt = (h / ft).round() # Convert to feet
         vertrate = (vs / fpm).round()
 
+        # Calculate fuel_cost per segment
+        fuel_cost = self.obj_fuel(X, U, self.dt, symbolic=False)
+
+        # Calculate grid_cost per segment (NaN if no interpolant)
+        if interpolant is not None:
+            grid_cost = self.obj_grid_cost(
+                X,
+                U,
+                self.dt,
+                interpolant=interpolant,
+                time_dependent=time_dependent,
+                n_dim=n_dim,
+                symbolic=False,
+            )
+        else:
+            grid_cost = np.full(n, np.nan)
+
         df = pd.DataFrame(
             dict(
                 mass=mass,
@@ -799,8 +835,8 @@ class Base:
                 tas=tas,
                 vertical_rate=vertrate,
                 heading=(np.rad2deg(psi) % 360).round(4),
-                # new added psi for reuse in init condition
-                # psi=psi,
+                fuel_cost=fuel_cost,
+                grid_cost=grid_cost,
             )
         )
 
