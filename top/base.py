@@ -182,6 +182,11 @@ class Base:
         mlw = oew + mpl  # Maximum Landing Weight
         mzfw = oew + mpl  # Maximum Zero Fuel Weight
 
+        # altitude
+        ceiling_m = bada3_data["ceiling"] # in meters
+        # Typical cruise altitude: 85% of ceiling, capped at FL410
+        typical_cruise_m = min(ceiling_m * 0.85, 12500)  # ~FL410 max
+
         aircraft = {
             # Mass parameters
             "mtow": mtow,  # already in kg
@@ -212,7 +217,8 @@ class Base:
             
             # Cruise parameters
             "cruise": {
-                "height": bada3_data["ceiling"],  # already converted to meters
+                "height": typical_cruise_m,  # meters
+                "ceiling": ceiling_m,  # already converted to meters
             },
             "limits": {
                 "MTOW": mtow,           # kg
@@ -297,6 +303,13 @@ class Base:
 
         if flight is None:
             h_cr = self.aircraft["cruise"]["height"]
+
+            # Sanity check for BADA3: don't use ceiling as cruise
+            if self.perf_model.lower() == "bada3":
+                ceiling = self.aircraft.get("cruise", {}).get("ceiling", 
+                        self.aircraft.get("ceiling", h_cr))
+                h_cr = min(h_cr, ceiling * 0.85, 12500)  # Cap at ~FL410
+
             xp_0, yp_0 = self.proj(self.lon1, self.lat1)
             xp_f, yp_f = self.proj(self.lon2, self.lat2)
             xp_guess = np.linspace(xp_0, xp_f, self.nodes + 1)
@@ -304,7 +317,14 @@ class Base:
             h_guess = h_cr * np.ones(self.nodes + 1)
         else:
             xp_guess, yp_guess = self.proj(flight.longitude, flight.latitude)
+            #Altitude sanity check
             h_guess = flight.altitude * ft
+            
+            # Clamp to reasonable bounds
+            if self.perf_model.lower() == "bada3":
+                ceiling = self.aircraft.get("ceiling", 13000)
+                h_guess = np.clip(h_guess, 3000, ceiling * 0.95)
+
             if "mass" in flight:
                 m_guess = flight.mass
 
