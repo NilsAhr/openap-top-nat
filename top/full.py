@@ -238,8 +238,8 @@ class CompleteFlight(Base):
         
         # Calculate phase boundaries based on distance (more realistic for long flights)
         # Typical climb: ~200-300 NM (~400-550 km), descent: ~100-150 NM (~200-300 km)
-        max_climb_range = 400_000   # 400 km for climb
-        max_descent_range = 300_000  # 300 km for descent
+        max_climb_range = 400_000   # 400 km for climb # 500_000 (heavy aircraft)
+        max_descent_range = 300_000  # 300 km for descent # 400_000 (heavy aircraft, oceanic arrival)
         
         dd = self.range / (self.nodes + 1)  # distance per node
         
@@ -256,8 +256,10 @@ class CompleteFlight(Base):
         idx_toc = max(3, min(idx_toc, self.nodes // 3))  # At least 3 nodes, max 1/3 of flight
         idx_tod = max(idx_toc + 5, min(idx_tod, self.nodes - 3))  # At least 5 nodes after TOC
         
-        h_cruise_min = 25000 * ft  # Minimum cruise altitude (~FL250)
-        
+        #h_cruise_min = 25000 * ft  # Minimum cruise altitude (~FL250)
+        # use FL300 for long haul flights
+        h_cruise_min = 30000 * ft
+
         if self.debug:
             print(f"Phase boundaries: TOC at node {idx_toc}, TOD at node {idx_tod} (of {self.nodes})")
 
@@ -508,6 +510,8 @@ class MultiPhase(Base):
 
         if self.debug:
             print("Finding the preliminary optimal cruise trajectory parameters...")
+            # Print performance model info
+            print(f"Using performance model: {self.perf_model.upper()}")
 
         dfcr = self.cruise.trajectory(obj_cr, **kwargs)
 
