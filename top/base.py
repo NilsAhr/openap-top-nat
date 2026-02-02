@@ -232,6 +232,7 @@ class Base:
                 "VMO": bada3_data["vmo"],             # knots
                 "MMO": bada3_data["mmo"],             # Mach
                 "ceiling": bada3_data["ceiling"],     # meters, h(altitude - state variable treat in meters)
+                "h_cruise": typical_cruise_m,   # meters
             }
 
         }
