@@ -238,8 +238,8 @@ class CompleteFlight(Base):
         
         # Calculate phase boundaries based on distance (more realistic for long flights)
         # Typical climb: ~200-300 NM (~400-550 km), descent: ~100-150 NM (~200-300 km)
-        max_climb_range = 400_000   # 400 km for climb # 500_000 (heavy aircraft)
-        max_descent_range = 300_000  # 300 km for descent # 400_000 (heavy aircraft, oceanic arrival)
+        max_climb_range = 500_000   # 400 km for climb # 500_000 (heavy aircraft)
+        max_descent_range = 400_000  # 300 km for descent # 400_000 (heavy aircraft, oceanic arrival)
         
         dd = self.range / (self.nodes + 1)  # distance per node
         
@@ -264,6 +264,7 @@ class CompleteFlight(Base):
             print(f"Phase boundaries: TOC at node {idx_toc}, TOD at node {idx_tod} (of {self.nodes})")
 
         # ----- CLIMB PHASE (0 to idx_toc) -----
+        # positive ROC enforced (nodes 0..idx_toc)
         for k in range(0, idx_toc):
             # Force positive vertical rate during climb
             g.append(U[k][1])
@@ -271,6 +272,7 @@ class CompleteFlight(Base):
             ubg.append([ca.inf])
 
         # ----- CRUISE PHASE (idx_toc to idx_tod) -----
+        # minimum FL300 + VS capped at ±500 fpm (nodes idx_toc..idx_tod)'
         for k in range(idx_toc, idx_tod):
             # Minimum cruise altitude
             g.append(X[k][2] - h_cruise_min)
@@ -283,12 +285,14 @@ class CompleteFlight(Base):
             ubg.append([500 * fpm])
 
         # ----- DESCENT PHASE (idx_tod to end) -----
+        # negative ROC enforced (nodes idx_tod..end)
         for k in range(idx_tod, self.nodes):
             # Force negative vertical rate during descent
             g.append(U[k][1])
             lbg.append([-ca.inf])
             ubg.append([0])
 
+        # old code. above is new version
         # constrain altitude during cruise for long cruise flights
         # if self.range > 1500_000:
         #     dd = self.range / (self.nodes + 1)
