@@ -351,7 +351,7 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         
         # Vertical speed threshold for determining level cruise (ft/min)
         # Bluesky uses phase flags; we approximate with vs threshold
-        self._vs_threshold_ftmin = 50.0  # ~0.25 m/s
+        self._vs_threshold_ftmin = 300.0  # ~0.25 m/s
         
         self._symbolic_func_enroute = None
         self._symbolic_func_nominal = None
