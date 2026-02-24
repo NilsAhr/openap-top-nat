@@ -121,6 +121,21 @@ class Cruise(Base):
         if initial_guess is not None:
             self.x_guess = self.initial_guess(initial_guess)
 
+            # Compute per-node heading guesses from the deviated positions
+            # so that the control guess is consistent with the state guess.
+            n_pts = len(self.x_guess)
+            if n_pts >= 2:
+                headings = np.zeros(self.nodes)
+                for i in range(self.nodes):
+                    i_next = min(i + 1, n_pts - 1)
+                    dx = self.x_guess[i_next, 0] - self.x_guess[i, 0]
+                    dy = self.x_guess[i_next, 1] - self.x_guess[i, 1]
+                    headings[i] = np.arctan2(dx, dy)  # radians, from north
+                self.u_guess_array = [
+                    [self.u_guess[0], self.u_guess[1], headings[i]]
+                    for i in range(self.nodes)
+                ]
+
         return_failed = kwargs.get("return_failed", False)
 
         C, D, B = self.collocation_coeff()
@@ -165,7 +180,10 @@ class Cruise(Base):
             else:
                 lbw.append(self.u_lb)
                 ubw.append(self.u_ub)
-            w0.append(self.u_guess)
+            if self.u_guess_array is not None:
+                w0.append(self.u_guess_array[k])
+            else:
+                w0.append(self.u_guess)
 
             # State at collocation points
             Xc = []
@@ -214,7 +232,7 @@ class Cruise(Base):
                 lbw.append(self.x_f_lb)
                 ubw.append(self.x_f_ub)
 
-            w0.append(self.x_guess[k])
+            w0.append(self.x_guess[k + 1])
 
             # Add equality constraint
             g.append(Xk_end - Xk)
