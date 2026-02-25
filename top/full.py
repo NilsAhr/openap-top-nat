@@ -2,7 +2,6 @@ import warnings
 from math import pi
 
 import casadi as ca
-
 import numpy as np
 import openap
 import openap.casadi as oc
@@ -16,7 +15,7 @@ from .descent import Descent
 
 try:
     from . import tools
-except:
+except Exception:
     RuntimeWarning("cfgrib and sklearn are required for wind integration")
 
 
@@ -107,6 +106,8 @@ class CompleteFlight(Base):
                 usually a exsiting flight trajectory.
             - return_failed (bool): If True, returns the DataFrame even if the
                 optimization fails. Default is False.
+            - autoscale_cost (bool): If True, objective is scaled based on initial guess
+
 
         Returns:
         - pd.DataFrame: A DataFrame containing the optimized trajectory.
@@ -155,7 +156,7 @@ class CompleteFlight(Base):
         ubw.append(self.x_0_ub)
         w0.append(self.x_guess[0])
         X.append(Xk)
-
+            
         # Formulate the NLP
         for k in range(self.nodes):
             # New NLP variable for the control
@@ -231,34 +232,95 @@ class CompleteFlight(Base):
         ubw.append([ca.inf])
         w0.append([7200])
 
-        # constrain altitude during cruise for long cruise flights
+        # ============================================================
+        # PHASE CONSTRAINTS: Unified climb/cruise/descent boundaries
+        # ============================================================
+        
+        # Calculate phase boundaries based on distance (more realistic for long flights)
+        # Typical climb: ~200-300 NM (~400-550 km), descent: ~100-150 NM (~200-300 km)
+        max_climb_range = 500_000   # 400 km for climb # 500_000 (heavy aircraft)
+        max_descent_range = 400_000  # 300 km for descent # 400_000 (heavy aircraft, oceanic arrival)
+        
+        dd = self.range / (self.nodes + 1)  # distance per node
+        
+        # Use distance-based indices for long flights, percentage for short flights
         if self.range > 1500_000:
-            dd = self.range / (self.nodes + 1)
-            max_climb_range = 500_000
-            max_descent_range = 300_000
-            idx_toc = int(max_climb_range / dd)
-            idx_tod = int((self.range - max_descent_range) / dd)
+            idx_toc = int(max_climb_range / dd)       # Top of climb index
+            idx_tod = int((self.range - max_descent_range) / dd)  # Top of descent index
+        else:
+            # For shorter flights, use percentage-based
+            idx_toc = int(self.nodes * 0.15)
+            idx_tod = int(self.nodes * 0.85)
+        
+        # Ensure valid indices
+        idx_toc = max(3, min(idx_toc, self.nodes // 3))  # At least 3 nodes, max 1/3 of flight
+        idx_tod = max(idx_toc + 5, min(idx_tod, self.nodes - 3))  # At least 5 nodes after TOC
+        
+        #h_cruise_min = 25000 * ft  # Minimum cruise altitude (~FL250)
+        # use FL300 for long haul flights
+        h_cruise_min = 30000 * ft
 
-            for k in range(idx_toc, idx_tod):
-                # minimum avoid large changes in altitude
-                g.append(U[k][1])
-                lbg.append([-500 * fpm])
-                ubg.append([500 * fpm])
+        if self.debug:
+            print(f"Phase boundaries: TOC at node {idx_toc}, TOD at node {idx_tod} (of {self.nodes})")
 
-                # minimum cruise alt FL150
-                g.append(X[k][2])
-                lbg.append([15000 * ft])
-                ubg.append([ca.inf])
+        # ----- CLIMB PHASE (0 to idx_toc) -----
+        # positive ROC enforced (nodes 0..idx_toc)
+        for k in range(0, idx_toc):
+            # Force positive vertical rate during climb
+            g.append(U[k][1])
+            lbg.append([0])
+            ubg.append([ca.inf])
 
-            for k in range(0, idx_toc):
-                g.append(U[k][1])
-                lbg.append([0])
-                ubg.append([ca.inf])
+        # ----- CRUISE PHASE (idx_toc to idx_tod) -----
+        # minimum FL300 + VS capped at ±500 fpm (nodes idx_toc..idx_tod)'
+        for k in range(idx_toc, idx_tod):
+            # Minimum cruise altitude
+            g.append(X[k][2] - h_cruise_min)
+            lbg.append([0])
+            ubg.append([ca.inf])
+            
+            # Limit vertical rate changes during cruise (smooth flight)
+            g.append(U[k][1])
+            lbg.append([-500 * fpm])
+            ubg.append([500 * fpm])
 
-            for k in range(idx_tod, self.nodes):
-                g.append(U[k][1])
-                lbg.append([-ca.inf])
-                ubg.append([0])
+        # ----- DESCENT PHASE (idx_tod to end) -----
+        # negative ROC enforced (nodes idx_tod..end)
+        for k in range(idx_tod, self.nodes):
+            # Force negative vertical rate during descent
+            g.append(U[k][1])
+            lbg.append([-ca.inf])
+            ubg.append([0])
+
+        # old code. above is new version
+        # constrain altitude during cruise for long cruise flights
+        # if self.range > 1500_000:
+        #     dd = self.range / (self.nodes + 1)
+        #     max_climb_range = 500_000
+        #     max_descent_range = 300_000
+        #     idx_toc = int(max_climb_range / dd)
+        #     idx_tod = int((self.range - max_descent_range) / dd)
+
+        #     for k in range(idx_toc, idx_tod):
+        #         # minimum avoid large changes in altitude
+        #         g.append(U[k][1])
+        #         lbg.append([-500 * fpm])
+        #         ubg.append([500 * fpm])
+
+        #         # minimum cruise alt FL150
+        #         g.append(X[k][2])
+        #         lbg.append([15000 * ft])
+        #         ubg.append([ca.inf])
+
+        #     for k in range(0, idx_toc):
+        #         g.append(U[k][1])
+        #         lbg.append([0])
+        #         ubg.append([ca.inf])
+
+        #     for k in range(idx_tod, self.nodes):
+        #         g.append(U[k][1])
+        #         lbg.append([-ca.inf])
+        #         ubg.append([0])
 
         # force and energy constraint
         for k in range(self.nodes):
@@ -354,7 +416,8 @@ class CompleteFlight(Base):
         output = ca.Function("output", [w], [X, U], ["w"], ["x", "u"])
         x_opt, u_opt = output(self.solution["x"])
 
-        df = self.to_trajectory(ts_final, x_opt, u_opt)
+        df = self.to_trajectory(ts_final, x_opt, u_opt, **kwargs)
+
         df_copy = df.copy()
 
         # check if the optimizer has failed
@@ -451,6 +514,8 @@ class MultiPhase(Base):
 
         if self.debug:
             print("Finding the preliminary optimal cruise trajectory parameters...")
+            # Print performance model info
+            print(f"Using performance model: {self.perf_model.upper()}")
 
         dfcr = self.cruise.trajectory(obj_cr, **kwargs)
 
@@ -507,3 +572,15 @@ class MultiPhase(Base):
         df_full = pd.concat([dfcl, dfcr, dfde], ignore_index=True)
 
         return df_full
+
+    def get_solver_stats(self):
+        """Get solver statistics for all phases.
+
+        Returns:
+            dict: Solver statistics for climb, cruise, and descent phases.
+        """
+        return {
+            "climb": self.climb.solver.stats(),
+            "cruise": self.cruise.solver.stats(),
+            "descent": self.descent.solver.stats(),
+        }

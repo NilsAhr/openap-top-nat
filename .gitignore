@@ -9,9 +9,13 @@ __pycache__/
 # C extensions
 *.so
 
-# meta data
+# files in output folder /  meta data
+data/output/**
 *.json
 *.pkl
+
+# exclude scenario files
+*.scn
 
 # data/ bada files
 /perf/data/**

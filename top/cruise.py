@@ -2,7 +2,6 @@ import warnings
 from math import pi
 
 import casadi as ca
-
 import numpy as np
 import openap.casadi as oc
 import pandas as pd
@@ -47,6 +46,7 @@ class Cruise(Base):
         ts_max = max(5, self.range / 1000 / 500) * 3600
 
         h_max = kwargs.get("h_max", self.aircraft["limits"]["ceiling"])
+        #h_max = kwargs.get("h_cruise", self.aircraft["limits"]["h_cruise"]) # 0.85 from ceiling
         h_min = kwargs.get("h_min", 15_000 * ft)
 
         hdg = oc.aero.bearing(self.lat1, self.lon1, self.lat2, self.lon2)
@@ -109,11 +109,32 @@ class Cruise(Base):
 
         self.init_model(objective, **kwargs)
 
+        # Print performance model info
+        if self.debug:
+            print(f"Using performance model: {self.perf_model.upper()}")
+
         customized_max_fuel = kwargs.get("max_fuel", None)
 
         initial_guess = kwargs.get("initial_guess", None)
+        self.u_guess_array = None  # Reset u_guess_array
+
         if initial_guess is not None:
             self.x_guess = self.initial_guess(initial_guess)
+
+            # Compute per-node heading guesses from the deviated positions
+            # so that the control guess is consistent with the state guess.
+            n_pts = len(self.x_guess)
+            if n_pts >= 2:
+                headings = np.zeros(self.nodes)
+                for i in range(self.nodes):
+                    i_next = min(i + 1, n_pts - 1)
+                    dx = self.x_guess[i_next, 0] - self.x_guess[i, 0]
+                    dy = self.x_guess[i_next, 1] - self.x_guess[i, 1]
+                    headings[i] = np.arctan2(dx, dy)  # radians, from north
+                self.u_guess_array = [
+                    [self.u_guess[0], self.u_guess[1], headings[i]]
+                    for i in range(self.nodes)
+                ]
 
         return_failed = kwargs.get("return_failed", False)
 
@@ -159,8 +180,10 @@ class Cruise(Base):
             else:
                 lbw.append(self.u_lb)
                 ubw.append(self.u_ub)
-
-            w0.append(self.u_guess)
+            if self.u_guess_array is not None:
+                w0.append(self.u_guess_array[k])
+            else:
+                w0.append(self.u_guess)
 
             # State at collocation points
             Xc = []
@@ -209,7 +232,7 @@ class Cruise(Base):
                 lbw.append(self.x_f_lb)
                 ubw.append(self.x_f_ub)
 
-            w0.append(self.x_guess[k])
+            w0.append(self.x_guess[k + 1])
 
             # Add equality constraint
             g.append(Xk_end - Xk)
@@ -330,7 +353,7 @@ class Cruise(Base):
         output = ca.Function("output", [w], [X, U], ["w"], ["x", "u"])
         x_opt, u_opt = output(self.solution["x"])
 
-        df = self.to_trajectory(ts_final, x_opt, u_opt)
+        df = self.to_trajectory(ts_final, x_opt, u_opt, **kwargs)
 
         df_copy = df.copy()
 

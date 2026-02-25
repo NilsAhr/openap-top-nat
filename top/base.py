@@ -1,22 +1,20 @@
 import warnings
-from math import pi
 from typing import Callable, Union
 
 import casadi as ca
+import openap.casadi as oc
+from openap.extra.aero import fpm, ft, kts
 
 import numpy as np
 import openap
-import openap.casadi as oc
 import pandas as pd
-from openap.extra.aero import fpm, ft, kts
-from pyproj import Proj
 
 # bada3_adapter import
 from .perf import make_bada3_backend
 
 try:
     from . import tools
-except:
+except Exception:
     RuntimeWarning("cfgrib and sklearn are required for wind integration")
 
 
@@ -81,7 +79,7 @@ class Base:
 
         if self.perf_model.lower() == "bada3":
             # Import BADA3 here to avoid circular imports
-            from .perf.bada3_adapter import load_model
+            from .perf import load_model
             
             try:
                 # Use the encoding-safe loader from bada3_adapter
@@ -161,10 +159,10 @@ class Base:
             max_range = self.wrap.cruise_range()["maximum"] * 1.2
             if self.range > max_range * 1000:
                 warnings.warn("The destination is likely out of maximum cruise range.")
-        else:
-            # For BADA3, we don't have WRAP, so skip range check or implement BADA3 range check
-            if self.debug:
-                print("Cruise range check skipped for BADA3 mode (WRAP not available)")
+        # For BADA3, we don't have WRAP, so skip range check or implement BADA3 range check
+        # #else:  
+            #if self.debug:
+            #    print("Cruise range check skipped for BADA3 mode (WRAP not available)")
         self.setup()
 
     def _create_aircraft_from_bada3(self, bada3_data: dict) -> dict:
@@ -183,6 +181,11 @@ class Base:
         # Calculate other mass parameters
         mlw = oew + mpl  # Maximum Landing Weight
         mzfw = oew + mpl  # Maximum Zero Fuel Weight
+
+        # altitude
+        ceiling_m = bada3_data["ceiling"] # in meters
+        # Typical cruise altitude: 85% of ceiling, capped at FL410
+        typical_cruise_m = min(ceiling_m * 0.85, 12500)  # ~FL410 max
 
         aircraft = {
             # Mass parameters
@@ -214,7 +217,8 @@ class Base:
             
             # Cruise parameters
             "cruise": {
-                "height": bada3_data["ceiling"],  # already converted to meters
+                "height": typical_cruise_m,  # meters
+                "ceiling": ceiling_m,  # already converted to meters
             },
             "limits": {
                 "MTOW": mtow,           # kg
@@ -228,6 +232,7 @@ class Base:
                 "VMO": bada3_data["vmo"],             # knots
                 "MMO": bada3_data["mmo"],             # Mach
                 "ceiling": bada3_data["ceiling"],     # meters, h(altitude - state variable treat in meters)
+                "h_cruise": typical_cruise_m,   # meters
             }
 
         }
@@ -299,6 +304,13 @@ class Base:
 
         if flight is None:
             h_cr = self.aircraft["cruise"]["height"]
+
+            # Sanity check for BADA3: don't use ceiling as cruise
+            if self.perf_model.lower() == "bada3":
+                ceiling = self.aircraft.get("cruise", {}).get("ceiling", 
+                        self.aircraft.get("ceiling", h_cr))
+                h_cr = min(h_cr, ceiling * 0.85, 12500)  # Cap at ~FL410
+
             xp_0, yp_0 = self.proj(self.lon1, self.lat1)
             xp_f, yp_f = self.proj(self.lon2, self.lat2)
             xp_guess = np.linspace(xp_0, xp_f, self.nodes + 1)
@@ -306,7 +318,14 @@ class Base:
             h_guess = h_cr * np.ones(self.nodes + 1)
         else:
             xp_guess, yp_guess = self.proj(flight.longitude, flight.latitude)
+            #Altitude sanity check
             h_guess = flight.altitude * ft
+            
+            # Clamp to reasonable bounds
+            if self.perf_model.lower() == "bada3":
+                ceiling = self.aircraft.get("ceiling", 13000)
+                h_guess = np.clip(h_guess, 3000, ceiling * 0.95)
+
             if "mass" in flight:
                 m_guess = flight.mass
 
@@ -445,7 +464,8 @@ class Base:
         tol = kwargs.get("tol", 1e-6)
         acceptable_tol = kwargs.get("acceptable_tol", 1e-4)
         alpha_for_y = kwargs.get("alpha_for_y", "primal-and-full")
-        hessian_approximation = kwargs.get("hessian_approximation", "limited-memory")
+        #hessian_approximation = kwargs.get("hessian_approximation", "limited-memory")
+        hessian_approximation = kwargs.get("hessian_approximation", "exact")
 
         self.debug = debug
 
@@ -475,6 +495,8 @@ class Base:
             self.solver_options[f"ipopt.{key}"] = value
 
     def init_model(self, objective, **kwargs):
+        autoscale_cost = kwargs.get("auto_scale_cost", False)
+
         # Model variables
         xp = ca.MX.sym("xp")
         yp = ca.MX.sym("yp")
@@ -506,12 +528,13 @@ class Base:
 
         L = self.objective(self.x, self.u, self.dt, **kwargs)
 
-        # scale objective based on initial guess
-        x0 = self.x_guess.T
-        u0 = self.u_guess
-        dt0 = self.range / 200 / self.nodes
-        cost = np.sum(self.objective(x0, u0, dt0, symbolic=False, **kwargs))
-        L = L / cost * 1e3
+        if autoscale_cost:
+            # scale objective based on initial guess
+            x0 = self.x_guess.T
+            u0 = self.u_guess
+            dt0 = self.range / 200 / self.nodes
+            cost = np.sum(self.objective(x0, u0, dt0, symbolic=False, **kwargs))
+            L = L / cost * 1e3
 
         # Continuous time dynamics
         self.func_dynamics = ca.Function(
@@ -594,12 +617,11 @@ class Base:
                     force_engine=True
                     )
 
-        # Fuel flow (kg/s), note our BADA3 adapter supports dT and numeric/symbolic inputs
+        # Fuel flow (kg/s), note BADA3 adapter supports dT and numeric/symbolic inputs
         ff = fuelflow.enroute(m, tas_kt, alt_ft, vs / fpm, dT=self.dT)
 
         # Quadrature: fuel burned over interval = ff * dt
         return ff * dt
-    
 
         # old
         #if symbolic:
@@ -714,7 +736,8 @@ class Base:
         time_dependent = kwargs.get("time_dependent", True)
         assert n_dim in [3, 4]
 
-        self.solver_options["ipopt.hessian_approximation"] = "limited-memory"
+        #self.solver_options["ipopt.hessian_approximation"] = "limited-memory"
+        self.solver_options["ipopt.hessian_approximation"] = "exact"
 
         lon, lat = self.proj(xp, yp, inverse=True, symbolic=symbolic)
 
@@ -760,10 +783,28 @@ class Base:
 
         return ratio * c1 / n1 + (1 - ratio) * c2 / n2
 
-    def to_trajectory(self, ts_final, x_opt, u_opt):
-        # Extract optimized states and controls
-        X = x_opt.full()  # [xp, yp, h, mass, ts]
-        U = u_opt.full()  # [mach, vs, psi]
+    def to_trajectory(self, ts_final, x_opt, u_opt, **kwargs):
+        """Convert optimization results to a trajectory DataFrame.
+
+        Args:
+            ts_final: Final timestamp
+            x_opt: Optimized states
+            u_opt: Optimized controls
+            **kwargs: Additional arguments including:
+                - interpolant: Grid cost interpolant function
+                - time_dependent: Whether grid cost is time dependent (default True)
+                - n_dim: Dimension of grid cost, 3 or 4 (default 4)
+
+        Returns:
+            pd.DataFrame: Trajectory with columns including fuel_cost and grid_cost
+        """
+        interpolant = kwargs.get("interpolant", None)
+        time_dependent = kwargs.get("time_dependent", True)
+        n_dim = kwargs.get("n_dim", 4)
+
+        # Extract optimised states and controls
+        X = x_opt.full() # [xp, yp, h, mass, ts]
+        U = u_opt.full() # [mach, vs, psi]
 
         # Extrapolate the final control point, Uf
         U2 = U[:, -2:-1]
@@ -786,6 +827,39 @@ class Base:
         alt = (h / ft).round() # Convert to feet
         vertrate = (vs / fpm).round()
 
+        def _as_1d(arr, n=None):
+            if hasattr(arr, "full"):
+                arr = arr.full()
+            arr = np.asarray(arr).squeeze()
+            if arr.ndim == 0:
+                arr = np.full(n, float(arr)) if n is not None else np.array([float(arr)])
+            arr = arr.astype(float)
+            if n is not None and arr.size != n:
+                if arr.size == n - 1:
+                    arr = np.append(arr, np.nan)
+                else:
+                    raise ValueError(f"Unexpected array size {arr.size}, expected {n} or {n-1}")
+            return arr
+
+        # Calculate fuel_cost per segment
+        fuel_cost = self.obj_fuel(X, U, self.dt, symbolic=False)
+        fuel_cost = _as_1d(fuel_cost, n)
+
+        # Calculate grid_cost per segment (NaN if no interpolant)
+        if interpolant is not None:
+            grid_cost = self.obj_grid_cost(
+                X,
+                U,
+                self.dt,
+                interpolant=interpolant,
+                time_dependent=time_dependent,
+                n_dim=n_dim,
+                symbolic=False,
+            )
+            grid_cost = _as_1d(grid_cost, n)
+        else:
+            grid_cost = np.full(n, np.nan)
+
         df = pd.DataFrame(
             dict(
                 mass=mass,
@@ -800,6 +874,8 @@ class Base:
                 tas=tas,
                 vertical_rate=vertrate,
                 heading=(np.rad2deg(psi) % 360).round(4),
+                fuel_cost=fuel_cost,
+                grid_cost=grid_cost,
             )
         )
 

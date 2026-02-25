@@ -1,9 +1,7 @@
 from math import pi
 
 import casadi as ca
-
 import numpy as np
-import openap
 import openap.casadi as oc
 import pandas as pd
 from openap.extra.aero import fpm, ft, kts
@@ -291,6 +289,6 @@ class Descent(Base):
         output = ca.Function("output", [w], [X, U], ["w"], ["x", "u"])
         x_opt, u_opt = output(self.solution["x"])
 
-        df = self.to_trajectory(ts_final, x_opt, u_opt)
+        df = self.to_trajectory(ts_final, x_opt, u_opt, **kwargs)
 
         return df
