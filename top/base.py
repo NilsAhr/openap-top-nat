@@ -338,10 +338,36 @@ class Base:
 
         return np.vstack([xp_guess, yp_guess, h_guess, m_guess, ts_guess]).T
 
-    def enable_wind(self, windfield: pd.DataFrame):
-        self.wind = tools.PolyWind(
-            windfield, self.proj, self.lat1, self.lon1, self.lat2, self.lon2
-        )
+    def enable_wind(self, windfield: pd.DataFrame, use_bspline=False, bspline_degree=3):
+        """Enable wind effects in the trajectory optimisation.
+
+        Parameters
+        ----------
+        windfield : pd.DataFrame
+            DataFrame with columns ``ts, h, latitude, longitude, u, v``.
+        use_bspline : bool
+            If *True*, use :class:`tools.BSplineWind` (CasADi B-spline
+            interpolation on the native lat/lon/h/ts grid).
+            If *False* (default), use the legacy :class:`tools.PolyWind`
+            (2nd-order polynomial regression).
+        bspline_degree : int
+            B-spline degree per axis (1 = linear, 3 = cubic). Only used
+            when ``use_bspline=True``.
+        """
+        if use_bspline:
+            self.wind = tools.BSplineWind(
+                windfield,
+                self.proj,
+                self.lat1,
+                self.lon1,
+                self.lat2,
+                self.lon2,
+                degree=bspline_degree,
+            )
+        else:
+            self.wind = tools.PolyWind(
+                windfield, self.proj, self.lat1, self.lon1, self.lat2, self.lon2
+            )
 
     def change_engine(self, engtype):
         self.engtype = engtype
