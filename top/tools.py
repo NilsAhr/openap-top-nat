@@ -117,7 +117,7 @@ class BSplineWind:
 
     Preserves the full spatial structure of the wind field (jet-stream
     cores, shear zones) that a polynomial regression would smooth out.
-    Builds two 4-D CasADi ``interpolant`` objects — one for *u* (eastward)
+    Builds two 4-D CasADi ``interpolant`` objects -- one for *u* (eastward)
     and one for *v* (northward) wind.
 
     Interface is drop-in compatible with :class:`PolyWind`:
@@ -140,10 +140,22 @@ class BSplineWind:
         Destination airport coordinates (degrees).
     margin : int
         Bounding-box margin in degrees around the route (default 5).
+    method : str
+        CasADi interpolation method (default ``'linear'``).
+
+        * ``'linear'`` -- 4-D multilinear (C0).  Handles **full-resolution**
+          grids (millions of points) in < 1 s.  Recommended default.
+        * ``'bspline'`` -- B-spline (C2 with degree 3).  Smooth
+          derivatives, but CasADi 3.7 crashes for 4-D grids above
+          ~8 000 points.  Use with *subsample* or tiny domains only.
     degree : int
-        B-spline degree per axis: 1 = linear, 3 = cubic (default 3).
-        Automatically reduced for axes with fewer than ``degree + 1``
-        unique values.
+        B-spline degree per axis (only used when ``method='bspline'``).
+        1 = linear, 3 = cubic (default 3).  Automatically reduced for
+        axes with fewer than ``degree + 1`` unique values.
+    subsample : int
+        Take every *n*-th point on the lat and lon axes to reduce
+        grid size (default 1 = full resolution).  Only relevant for
+        ``method='bspline'``; the ``'linear'`` method handles full grids.
     """
 
     def __init__(
@@ -155,9 +167,12 @@ class BSplineWind:
         lat2: float,
         lon2: float,
         margin: int = 5,
+        method: str = "linear",
         degree: int = 3,
+        subsample: int = 1,
     ):
         self.proj = proj
+        self.method = method
         self.degree = degree
 
         # ---- bounding box ------------------------------------------------
@@ -169,8 +184,7 @@ class BSplineWind:
         # ---- filter wind data to domain ----------------------------------
         df = windfield.query(
             f"latitude  >= {lat_lo} and latitude  <= {lat_hi} and "
-            f"longitude >= {lon_lo} and longitude <= {lon_hi} and "
-            f"h <= 13000"
+            f"longitude >= {lon_lo} and longitude <= {lon_hi}"
         ).copy()
 
         if df.empty:
@@ -184,23 +198,36 @@ class BSplineWind:
         n_nan = df[["u", "v"]].isna().sum().sum()
         if n_nan > 0:
             raise ValueError(
-                f"BSplineWind: {n_nan} NaN value(s) in wind data — "
+                f"BSplineWind: {n_nan} NaN value(s) in wind data - "
                 f"clean the input DataFrame before constructing the "
                 f"interpolant."
             )
 
+        # ---- subsample lat/lon to reduce grid size -----------------------
+        if subsample > 1 and method == "bspline":
+            keep_lats = np.sort(df.latitude.unique())[::subsample]
+            keep_lons = np.sort(df.longitude.unique())[::subsample]
+            df = df[df.latitude.isin(keep_lats) & df.longitude.isin(keep_lons)].copy()
+
         # ---- build CasADi interpolants -----------------------------------
         self._interp_u, self._interp_v, self._bounds, self._grid_info = \
-            self._build_interpolants(df, degree)
+            self._build_interpolants(df, method, degree)
 
     # ------------------------------------------------------------------
     #  Interpolant construction
     # ------------------------------------------------------------------
-    def _build_interpolants(self, df, degree):
-        """Build 4-D CasADi B-spline interpolants for *u* and *v* wind.
+    def _build_interpolants(self, df, method, degree):
+        """Build 4-D CasADi interpolants for *u* and *v* wind.
+
+        Parameters
+        ----------
+        method : str
+            ``'linear'`` for multilinear or ``'bspline'`` for B-spline.
+        degree : int
+            B-spline degree (ignored when *method* = ``'linear'``).
 
         Grid axes: ``[lat, lon, h, ts]``  (lat varies fastest in the
-        flattened value vector — CasADi column-major convention).
+        flattened value vector -- CasADi column-major convention).
         """
         # Unique, sorted grid axes
         lats = np.sort(df.latitude.unique()).astype(np.float64)
@@ -213,28 +240,14 @@ class BSplineWind:
         actual   = len(df)
         if actual != expected:
             raise ValueError(
-                f"BSplineWind: incomplete grid — expected {expected} points "
-                f"({len(lats)} lat × {len(lons)} lon × {len(hs)} h "
-                f"× {len(tss)} ts), got {actual} rows. "
+                f"BSplineWind: incomplete grid - expected {expected} points "
+                f"({len(lats)} lat x {len(lons)} lon x {len(hs)} h "
+                f"x {len(tss)} ts), got {actual} rows. "
                 f"The wind DataFrame must be a complete regular grid."
             )
 
-        # Adapt degree per axis (need at least degree+1 knots)
-        axes = [("lat", lats), ("lon", lons), ("h", hs), ("ts", tss)]
-        deg_per_axis = []
-        for name, vec in axes:
-            max_deg = max(len(vec) - 1, 0)
-            d = min(degree, max_deg)
-            if d < degree:
-                warnings.warn(
-                    f"BSplineWind: '{name}' axis has only {len(vec)} "
-                    f"point(s) — reducing B-spline degree from "
-                    f"{degree} to {d}"
-                )
-            deg_per_axis.append(d)
-
         # Sort DataFrame so that lat varies fastest (CasADi convention).
-        # Grid = [lat, lon, h, ts] → sort by [ts, h, lon, lat] ascending
+        # Grid = [lat, lon, h, ts] -> sort by [ts, h, lon, lat] ascending
         # so that the first axis (lat) changes with every row.
         df_sorted = df.sort_values(
             ["ts", "h", "longitude", "latitude"], ascending=True
@@ -243,14 +256,36 @@ class BSplineWind:
         u_vals = df_sorted["u"].values.astype(np.float64)
         v_vals = df_sorted["v"].values.astype(np.float64)
 
-        opts = {"degree": deg_per_axis}
+        grid = [lats, lons, hs, tss]
 
-        interp_u = ca.interpolant(
-            "u_wind", "bspline", [lats, lons, hs, tss], u_vals, opts
-        )
-        interp_v = ca.interpolant(
-            "v_wind", "bspline", [lats, lons, hs, tss], v_vals, opts
-        )
+        if method == "linear":
+            # --- multilinear (C0, handles huge grids) ---
+            interp_u = ca.interpolant("u_wind", "linear", grid, u_vals)
+            interp_v = ca.interpolant("v_wind", "linear", grid, v_vals)
+            degree_used = [1, 1, 1, 1]
+        elif method == "bspline":
+            # --- B-spline (C2 for degree 3, limited grid size) ---
+            axes = [("lat", lats), ("lon", lons), ("h", hs), ("ts", tss)]
+            deg_per_axis = []
+            for name, vec in axes:
+                max_deg = max(len(vec) - 1, 0)
+                d = min(degree, max_deg)
+                if d < degree:
+                    warnings.warn(
+                        f"BSplineWind: '{name}' axis has only {len(vec)} "
+                        f"point(s) - reducing B-spline degree from "
+                        f"{degree} to {d}"
+                    )
+                deg_per_axis.append(d)
+            opts = {"degree": deg_per_axis}
+            interp_u = ca.interpolant("u_wind", "bspline", grid, u_vals, opts)
+            interp_v = ca.interpolant("v_wind", "bspline", grid, v_vals, opts)
+            degree_used = deg_per_axis
+        else:
+            raise ValueError(
+                f"BSplineWind: unknown method '{method}'. "
+                f"Use 'linear' or 'bspline'."
+            )
 
         bounds = {
             "lat": (float(lats[0]),  float(lats[-1])),
@@ -262,7 +297,8 @@ class BSplineWind:
         grid_info = {
             "n_lat": len(lats), "n_lon": len(lons),
             "n_h":   len(hs),   "n_ts":  len(tss),
-            "degree": deg_per_axis,
+            "method": method,
+            "degree": degree_used,
             "total_points": actual,
         }
 
@@ -287,18 +323,39 @@ class BSplineWind:
     # ------------------------------------------------------------------
     #  Main query interface  (drop-in for PolyWind)
     # ------------------------------------------------------------------
+    def _is_numeric_array(self, v):
+        """True if *v* is a numpy array (or list) with more than one element."""
+        return isinstance(v, (np.ndarray, list)) and np.asarray(v).size > 1
+
     def calc_u(self, x, y, h, ts):
         """Evaluate eastward wind (m/s) at projected coordinates.
 
         Parameters match :class:`PolyWind`: ``(x, y)`` in projected
         metres, ``h`` in metres, ``ts`` in seconds.
+
+        Handles both CasADi symbolic scalars (during NLP construction)
+        and numpy arrays (during post-processing in ``to_trajectory``).
         """
+        if self._is_numeric_array(x):
+            # Batch evaluation: use eval_uv via inverse projection
+            x, y, h, ts = (np.asarray(v) for v in (x, y, h, ts))
+            lon_arr, lat_arr = self.proj(x, y, inverse=True)
+            u, _ = self.eval_uv(lat_arr, lon_arr, h, ts)
+            return u
+
+        # Scalar / CasADi symbolic path (used during optimisation)
         lon, lat = self.proj(x, y, inverse=True, symbolic=True)
         lat_c, lon_c, h_c, ts_c = self._clamp(lat, lon, h, ts)
         return self._interp_u(ca.vertcat(lat_c, lon_c, h_c, ts_c))
 
     def calc_v(self, x, y, h, ts):
         """Evaluate northward wind (m/s) at projected coordinates."""
+        if self._is_numeric_array(x):
+            x, y, h, ts = (np.asarray(v) for v in (x, y, h, ts))
+            lon_arr, lat_arr = self.proj(x, y, inverse=True)
+            _, v = self.eval_uv(lat_arr, lon_arr, h, ts)
+            return v
+
         lon, lat = self.proj(x, y, inverse=True, symbolic=True)
         lat_c, lon_c, h_c, ts_c = self._clamp(lat, lon, h, ts)
         return self._interp_v(ca.vertcat(lat_c, lon_c, h_c, ts_c))
@@ -340,7 +397,8 @@ class BSplineWind:
         b = self._bounds
         return (
             f"BSplineWind("
-            f"{g['n_lat']}×{g['n_lon']}×{g['n_h']}×{g['n_ts']} grid, "
+            f"method='{g['method']}', "
+            f"{g['n_lat']}x{g['n_lon']}x{g['n_h']}x{g['n_ts']} grid, "
             f"degree={g['degree']}, "
             f"lat=[{b['lat'][0]:.1f},{b['lat'][1]:.1f}], "
             f"lon=[{b['lon'][0]:.1f},{b['lon'][1]:.1f}], "

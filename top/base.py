@@ -338,7 +338,8 @@ class Base:
 
         return np.vstack([xp_guess, yp_guess, h_guess, m_guess, ts_guess]).T
 
-    def enable_wind(self, windfield: pd.DataFrame, use_bspline=False, bspline_degree=3):
+    def enable_wind(self, windfield: pd.DataFrame, use_bspline=False,
+                    wind_method="linear", bspline_degree=3, bspline_subsample=1):
         """Enable wind effects in the trajectory optimisation.
 
         Parameters
@@ -346,13 +347,21 @@ class Base:
         windfield : pd.DataFrame
             DataFrame with columns ``ts, h, latitude, longitude, u, v``.
         use_bspline : bool
-            If *True*, use :class:`tools.BSplineWind` (CasADi B-spline
+            If *True*, use :class:`tools.BSplineWind` (CasADi grid
             interpolation on the native lat/lon/h/ts grid).
             If *False* (default), use the legacy :class:`tools.PolyWind`
             (2nd-order polynomial regression).
+        wind_method : str
+            CasADi interpolation method (default ``'linear'``).
+
+            * ``'linear'`` -- 4-D multilinear (C0, fast, full resolution)
+            * ``'bspline'`` -- B-spline (C2, slow, limited to small grids)
         bspline_degree : int
             B-spline degree per axis (1 = linear, 3 = cubic). Only used
-            when ``use_bspline=True``.
+            when ``wind_method='bspline'``.
+        bspline_subsample : int
+            Take every *n*-th lat/lon point to reduce grid size and
+            build time. Only relevant for ``wind_method='bspline'``.
         """
         if use_bspline:
             self.wind = tools.BSplineWind(
@@ -362,7 +371,9 @@ class Base:
                 self.lon1,
                 self.lat2,
                 self.lon2,
+                method=wind_method,
                 degree=bspline_degree,
+                subsample=bspline_subsample,
             )
         else:
             self.wind = tools.PolyWind(
