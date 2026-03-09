@@ -156,6 +156,18 @@ class BSplineWind:
         Take every *n*-th point on the lat and lon axes to reduce
         grid size (default 1 = full resolution).  Only relevant for
         ``method='bspline'``; the ``'linear'`` method handles full grids.
+    max_flight_time_s : float or None
+        If given, clip the time axis to ``ts <= max_flight_time_s``
+        *before* building the interpolant.  This is critical for
+        batch runs where the wind DataFrame covers a multi-day window
+        but each flight only needs ~8-14 hours.  Reduces the time
+        axis from e.g. 47 steps to ~10-14, cutting the total grid
+        size by 3-5×.  Set to ``flight_hours * 3600`` or use
+        ``None`` (default) to keep all time steps.
+    time_subsample : int
+        Take every *n*-th time step (default 1 = keep all).
+        Applied *after* ``max_flight_time_s`` clipping.  Useful
+        when hourly data is available but 3-4 h resolution suffices.
     """
 
     def __init__(
@@ -170,6 +182,8 @@ class BSplineWind:
         method: str = "linear",
         degree: int = 3,
         subsample: int = 1,
+        max_flight_time_s: float | None = None,
+        time_subsample: int = 1,
     ):
         self.proj = proj
         self.method = method
@@ -203,11 +217,32 @@ class BSplineWind:
                 f"interpolant."
             )
 
+        # ---- clip time axis to flight duration -------------------------
+        if max_flight_time_s is not None:
+            ts_before = df.ts.nunique()
+            df = df.query(f"ts <= {max_flight_time_s}").copy()
+            ts_after = df.ts.nunique()
+            if ts_after < ts_before:
+                warnings.warn(
+                    f"BSplineWind: clipped time axis from {ts_before} to "
+                    f"{ts_after} steps (max_flight_time_s={max_flight_time_s/3600:.0f}h)"
+                )
+            if df.empty:
+                raise ValueError(
+                    f"BSplineWind: no data after time clipping "
+                    f"(max_flight_time_s={max_flight_time_s})"
+                )
+
         # ---- subsample lat/lon to reduce grid size -----------------------
         if subsample > 1 and method == "bspline":
             keep_lats = np.sort(df.latitude.unique())[::subsample]
             keep_lons = np.sort(df.longitude.unique())[::subsample]
             df = df[df.latitude.isin(keep_lats) & df.longitude.isin(keep_lons)].copy()
+
+        # ---- subsample time axis -----------------------------------------
+        if time_subsample > 1 and method == "bspline":
+            keep_tss = np.sort(df.ts.unique())[::time_subsample]
+            df = df[df.ts.isin(keep_tss)].copy()
 
         # ---- build CasADi interpolants -----------------------------------
         self._interp_u, self._interp_v, self._bounds, self._grid_info = \

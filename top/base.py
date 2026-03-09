@@ -339,7 +339,8 @@ class Base:
         return np.vstack([xp_guess, yp_guess, h_guess, m_guess, ts_guess]).T
 
     def enable_wind(self, windfield: pd.DataFrame, use_bspline=False,
-                    wind_method="linear", bspline_degree=3, bspline_subsample=1):
+                    wind_method="linear", bspline_degree=3, bspline_subsample=1,
+                    max_flight_time_s=None, time_subsample=1):
         """Enable wind effects in the trajectory optimisation.
 
         Parameters
@@ -362,6 +363,11 @@ class Base:
         bspline_subsample : int
             Take every *n*-th lat/lon point to reduce grid size and
             build time. Only relevant for ``wind_method='bspline'``.
+        max_flight_time_s : float or None
+            Clip the time axis to ``ts <= max_flight_time_s`` before
+            building the interpolant.  Critical for batch runs.
+        time_subsample : int
+            Take every *n*-th time step (default 1).
         """
         if use_bspline:
             self.wind = tools.BSplineWind(
@@ -374,6 +380,8 @@ class Base:
                 method=wind_method,
                 degree=bspline_degree,
                 subsample=bspline_subsample,
+                max_flight_time_s=max_flight_time_s,
+                time_subsample=time_subsample,
             )
         else:
             self.wind = tools.PolyWind(
