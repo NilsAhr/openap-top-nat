@@ -467,25 +467,43 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         # Convert to kg/s
         return f_kgmin / 60.0
 
+    def _drag_based_cruise_fuel_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, dT=0):
+        """
+        Cruise fuel flow [kg/s] using DRAG as the effective thrust.
+
+        In Bluesky's perfbada.py, level/shallow-climb fuel flow uses:
+            thrust_for_cruise_ff = D   (not T_required)
+            fcr = eta * D * Cf_cruise
+
+        This matches the BADA definition: during cruise (including
+        cruise-climb with VS < 300 fpm), the aircraft is assumed to
+        fly in thrust = drag equilibrium.  The small excess thrust
+        needed for the shallow climb is ignored for the fuel-flow
+        calculation.
+        """
+        D = self._drag_clean_symbolic(mass, tas_kt, alt_ft, vs_ftmin)
+        eta = self._thrust_specific_fuel_consumption(tas_kt)
+        f_cruise_kgmin = eta * D * self._Cf_cruise
+        return f_cruise_kgmin / 60.0
+
     def _bluesky_fuel_flow_symbolic(self, mass, tas_kt, alt_ft, vs_ftmin=0, acc=0, dT=0):
         """
         Bluesky-style fuel flow calculation with phase logic.
-        
+
         Phase determination (approximated from vertical speed):
-        - Climbing: vs > threshold -> thrust-based fuel
-        - Level cruise: |vs| <= threshold -> cruise-corrected fuel (Cf_cruise * thrust-based)
-        - Descending: vs < -threshold -> idle fuel
+        - Climbing (VS > 300 fpm):  thrust-based fuel (eta * T_required)
+        - Level / shallow climb/descent (|VS| <= 300 fpm):
+              cruise-corrected fuel using DRAG as effective thrust
+              (eta * D * Cf_cruise)  -- matches Bluesky perfbada.py
+        - Descending (VS < -300 fpm): idle fuel
         """
-        # Calculate base fuel flows
+        # Steep climb / acceleration: full thrust-based fuel flow
         f_thrust = self._thrust_based_fuel_symbolic(mass, tas_kt, alt_ft, vs_ftmin, acc, dT)
+        # Descent: idle fuel flow
         f_idle = self._idle_fuel_symbolic(alt_ft)
-        
-        # Apply cruise correction for level flight
-        # In Bluesky: fcr = Cf_cruise * f (only during level cruise)
-        f_cruise = self._Cf_cruise * f_thrust
-        
-        # For symbolic: blend based on phase indicators
-        # Descent uses idle, climb uses thrust-based, level uses cruise-corrected      
+        # Cruise / shallow climb / shallow descent: drag-based cruise fuel flow
+        f_cruise = self._drag_based_cruise_fuel_symbolic(mass, tas_kt, alt_ft, vs_ftmin, dT)
+
         vs_threshold = self._vs_threshold_ftmin
         ff = ca.if_else(
                 vs_ftmin < -vs_threshold,
