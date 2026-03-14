@@ -73,7 +73,8 @@ class Cruise(Base):
         self.u_f_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
 
         # Control - Lower and upper bound
-        self.u_lb = [0.5, -500 * fpm, psi - pi / 2]
+        #self.u_lb = [0.5, -500 * fpm, psi - pi / 2]
+        self.u_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 2]
         self.u_ub = [self.mach_max, 500 * fpm, psi + pi / 2]
 
         # Initial guess - states
