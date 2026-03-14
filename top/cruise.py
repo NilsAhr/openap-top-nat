@@ -65,11 +65,11 @@ class Cruise(Base):
         self.x_ub = [x_max, y_max, h_max, self.mass_init, ts_max]
 
         # Control init - lower and upper bounds
-        self.u_0_lb = [0.5, -500 * fpm, psi - pi / 4]
+        self.u_0_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
         self.u_0_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
 
         # Control final - lower and upper bounds
-        self.u_f_lb = [0.5, -500 * fpm, psi - pi / 4]
+        self.u_f_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
         self.u_f_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
 
         # Control - Lower and upper bound
@@ -81,7 +81,7 @@ class Cruise(Base):
         self.x_guess = self.initial_guess()
 
         # Initial guess - controls
-        self.u_guess = [0.7, 0, psi]
+        self.u_guess = [self.mach_max - 0.03, 0, psi]
 
     def trajectory(self, objective="fuel", **kwargs) -> pd.DataFrame:
         """
