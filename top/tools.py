@@ -234,13 +234,13 @@ class BSplineWind:
                 )
 
         # ---- subsample lat/lon to reduce grid size -----------------------
-        if subsample > 1 and method == "bspline":
+        if subsample > 1:
             keep_lats = np.sort(df.latitude.unique())[::subsample]
             keep_lons = np.sort(df.longitude.unique())[::subsample]
             df = df[df.latitude.isin(keep_lats) & df.longitude.isin(keep_lons)].copy()
 
         # ---- subsample time axis -----------------------------------------
-        if time_subsample > 1 and method == "bspline":
+        if time_subsample > 1:
             keep_tss = np.sort(df.ts.unique())[::time_subsample]
             df = df[df.ts.isin(keep_tss)].copy()
 

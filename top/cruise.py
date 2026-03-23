@@ -47,7 +47,8 @@ class Cruise(Base):
 
         h_max = kwargs.get("h_max", self.aircraft["limits"]["ceiling"])
         #h_max = kwargs.get("h_cruise", self.aircraft["limits"]["h_cruise"]) # 0.85 from ceiling
-        h_min = kwargs.get("h_min", 15_000 * ft)
+        #h_min = kwargs.get("h_min", 15_000 * ft)
+        h_min = kwargs.get("h_min", 30_000 * ft)
 
         hdg = oc.aero.bearing(self.lat1, self.lon1, self.lat2, self.lon2)
         psi = hdg * pi / 180
