@@ -48,7 +48,7 @@ class Cruise(Base):
         h_max = kwargs.get("h_max", self.aircraft["limits"]["ceiling"])
         #h_max = kwargs.get("h_cruise", self.aircraft["limits"]["h_cruise"]) # 0.85 from ceiling
         #h_min = kwargs.get("h_min", 15_000 * ft)
-        h_min = kwargs.get("h_min", 30_000 * ft)
+        h_min = kwargs.get("h_min", 20_000 * ft)
 
         hdg = oc.aero.bearing(self.lat1, self.lon1, self.lat2, self.lon2)
         psi = hdg * pi / 180
@@ -74,8 +74,8 @@ class Cruise(Base):
         self.u_f_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
 
         # Control - Lower and upper bound
-        #self.u_lb = [0.5, -500 * fpm, psi - pi / 2]
-        self.u_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 2]
+        self.u_lb = [0.5, -500 * fpm, psi - pi / 2]
+        #self.u_lb = [self.mach_max - 0.15, -500 * fpm, psi - pi / 2]
         self.u_ub = [self.mach_max, 500 * fpm, psi + pi / 2]
 
         # Initial guess - states
@@ -293,8 +293,11 @@ class Cruise(Base):
         # smooth heading change
         for k in range(self.nodes - 1):
             g.append(U[k + 1][2] - U[k][2])
-            lbg.append([-15 * pi / 180])
-            ubg.append([15 * pi / 180])
+            #lbg.append([-15 * pi / 180])
+            #ubg.append([15 * pi / 180])
+            lbg.append([-5 * pi / 180])
+            ubg.append([5 * pi / 180])
+
 
         # optional constraints
         if self.fix_mach:
