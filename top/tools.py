@@ -65,9 +65,12 @@ def height_to_pressure_pa(h_m):
 class PolyWind:
     """
     A class to model wind fields using second order polynomial regression.
+
+    Accepts geographic coordinates (lat/lon in degrees) directly —
+    no projection involved.
     """
 
-    def __init__(self, windfield: pd.DataFrame, proj, lat1, lon1, lat2, lon2, margin=5):
+    def __init__(self, windfield: pd.DataFrame, lat1, lon1, lat2, lon2, margin=5):
         self.wind = windfield
 
         # select region based on airports
@@ -79,9 +82,8 @@ class PolyWind:
             .query("h <= 13000")
         )
 
-        x, y = proj(df.longitude, df.latitude)
-
-        df = df.assign(x=x, y=y)
+        # Fit polynomial on geographic (lat, lon) coordinates
+        df = df.assign(x=df.latitude, y=df.longitude)
 
         model = make_pipeline(PolynomialFeatures(2), Ridge())
         model.fit(df[["x", "y", "h", "ts"]], df[["u", "v"]])
@@ -93,19 +95,21 @@ class PolyWind:
         self.features = features
         self.coef_u, self.coef_v = model["ridge"].coef_
 
-    def calc_u(self, x, y, h, ts):
+    def calc_u(self, lat, lon, h, ts):
+        """Eastward wind (m/s). lat, lon in degrees."""
         u = sum(
             [
-                eval(f, {}, {"x": x, "y": y, "h": h, "ts": ts}) * c
+                eval(f, {}, {"x": lat, "y": lon, "h": h, "ts": ts}) * c
                 for (f, c) in zip(self.features, self.coef_u)
             ]
         )
         return u
 
-    def calc_v(self, x, y, h, ts):
+    def calc_v(self, lat, lon, h, ts):
+        """Northward wind (m/s). lat, lon in degrees."""
         v = sum(
             [
-                eval(f, {}, {"x": x, "y": y, "h": h, "ts": ts}) * c
+                eval(f, {}, {"x": lat, "y": lon, "h": h, "ts": ts}) * c
                 for (f, c) in zip(self.features, self.coef_v)
             ]
         )
@@ -120,10 +124,9 @@ class BSplineWind:
     Builds two 4-D CasADi ``interpolant`` objects -- one for *u* (eastward)
     and one for *v* (northward) wind.
 
-    Interface is drop-in compatible with :class:`PolyWind`:
-    ``calc_u(x, y, h, ts)`` and ``calc_v(x, y, h, ts)`` accept the
-    optimizer's projected coordinates and internally convert back to
-    geographic coordinates before querying the interpolant.
+    ``calc_u(lat, lon, h, ts)`` and ``calc_v(lat, lon, h, ts)`` accept
+    latitude and longitude in **degrees** (the optimizer state units)
+    and query the interpolant directly — no projection involved.
 
     Parameters
     ----------
@@ -131,9 +134,6 @@ class BSplineWind:
         Must contain columns ``ts, h, latitude, longitude, u, v``.
         Must be a **complete regular grid** (every combination of the four
         coordinate axes is present exactly once).
-    proj : callable
-        Projection function from :class:`Base` (supports
-        ``inverse=True, symbolic=True``).
     lat1, lon1 : float
         Origin airport coordinates (degrees).
     lat2, lon2 : float
@@ -173,7 +173,6 @@ class BSplineWind:
     def __init__(
         self,
         windfield: pd.DataFrame,
-        proj,
         lat1: float,
         lon1: float,
         lat2: float,
@@ -185,7 +184,6 @@ class BSplineWind:
         max_flight_time_s: float | None = None,
         time_subsample: int = 1,
     ):
-        self.proj = proj
         self.method = method
         self.degree = degree
 
@@ -362,36 +360,36 @@ class BSplineWind:
         """True if *v* is a numpy array (or list) with more than one element."""
         return isinstance(v, (np.ndarray, list)) and np.asarray(v).size > 1
 
-    def calc_u(self, x, y, h, ts):
-        """Evaluate eastward wind (m/s) at projected coordinates.
+    def calc_u(self, lat, lon, h, ts):
+        """Evaluate eastward wind (m/s) at geographic coordinates.
 
-        Parameters match :class:`PolyWind`: ``(x, y)`` in projected
-        metres, ``h`` in metres, ``ts`` in seconds.
+        Parameters: lat, lon in **degrees** (matching the wind-grid
+        coordinate system; the optimiser converts radian states
+        to degrees before calling this method).
+        ``h`` in metres, ``ts`` in seconds.
 
         Handles both CasADi symbolic scalars (during NLP construction)
         and numpy arrays (during post-processing in ``to_trajectory``).
         """
-        if self._is_numeric_array(x):
-            # Batch evaluation: use eval_uv via inverse projection
-            x, y, h, ts = (np.asarray(v) for v in (x, y, h, ts))
-            lon_arr, lat_arr = self.proj(x, y, inverse=True)
-            u, _ = self.eval_uv(lat_arr, lon_arr, h, ts)
+        if self._is_numeric_array(lat):
+            # Batch evaluation (numpy)
+            u, _ = self.eval_uv(
+                np.asarray(lat), np.asarray(lon),
+                np.asarray(h), np.asarray(ts),
+            )
             return u
 
         # Scalar / CasADi symbolic path (used during optimisation)
-        lon, lat = self.proj(x, y, inverse=True, symbolic=True)
         lat_c, lon_c, h_c, ts_c = self._clamp(lat, lon, h, ts)
         return self._interp_u(ca.vertcat(lat_c, lon_c, h_c, ts_c))
 
-    def calc_v(self, x, y, h, ts):
-        """Evaluate northward wind (m/s) at projected coordinates."""
-        if self._is_numeric_array(x):
-            x, y, h, ts = (np.asarray(v) for v in (x, y, h, ts))
-            lon_arr, lat_arr = self.proj(x, y, inverse=True)
-            _, v = self.eval_uv(lat_arr, lon_arr, h, ts)
+    def calc_v(self, lat, lon, h, ts):
+        """Evaluate northward wind (m/s) at geographic coordinates."""
+        if self._is_numeric_array(lat):
+            lat, lon, h, ts = (np.asarray(v) for v in (lat, lon, h, ts))
+            _, v = self.eval_uv(lat, lon, h, ts)
             return v
 
-        lon, lat = self.proj(x, y, inverse=True, symbolic=True)
         lat_c, lon_c, h_c, ts_c = self._clamp(lat, lon, h, ts)
         return self._interp_v(ca.vertcat(lat_c, lon_c, h_c, ts_c))
 

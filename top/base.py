@@ -12,6 +12,9 @@ import pandas as pd
 # bada3_adapter import
 from .perf import make_bada3_backend
 
+# Mean Earth radius (m) for spherical geodesic ODE
+R_EARTH = 6.371e6
+
 try:
     from . import tools
 except Exception:
@@ -267,7 +270,48 @@ class Base:
         if "limits" in openap_aircraft:
             self.aircraft.setdefault("limits", openap_aircraft["limits"])
 
+    def _gc_intermediate_points(self, n):
+        """Return *n* great-circle intermediate points (including endpoints).
+
+        Returns
+        -------
+        lat_rad, lon_rad : np.ndarray, shape (n,)
+            Latitude and longitude in **radians**.
+        """
+        lat1 = np.deg2rad(self.lat1)
+        lon1 = np.deg2rad(self.lon1)
+        lat2 = np.deg2rad(self.lat2)
+        lon2 = np.deg2rad(self.lon2)
+
+        # Angular distance (Haversine)
+        d = 2.0 * np.arcsin(np.sqrt(
+            np.sin((lat2 - lat1) / 2.0) ** 2
+            + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2.0) ** 2
+        ))
+
+        fracs = np.linspace(0.0, 1.0, n)
+
+        if d < 1e-12:
+            return np.full(n, np.deg2rad(self.lat1)), np.full(n, np.deg2rad(self.lon1))
+
+        A = np.sin((1.0 - fracs) * d) / np.sin(d)
+        B = np.sin(fracs * d) / np.sin(d)
+
+        x = A * np.cos(lat1) * np.cos(lon1) + B * np.cos(lat2) * np.cos(lon2)
+        y = A * np.cos(lat1) * np.sin(lon1) + B * np.cos(lat2) * np.sin(lon2)
+        z = A * np.sin(lat1) + B * np.sin(lat2)
+
+        lats = np.arctan2(z, np.sqrt(x ** 2 + y ** 2))   # radians
+        lons = np.arctan2(y, x)                             # radians
+        return lats, lons
+
     def proj(self, lon, lat, inverse=False, symbolic=False):
+        """Legacy azimuthal-equidistant projection (DEPRECATED).
+
+        Kept only for backward compatibility with Climb / Descent / Full.
+        The Cruise optimiser no longer uses this — it works in geographic
+        coordinates (lat/lon degrees) directly.
+        """
         lat0 = (self.lat1 + self.lat2) / 2
         lon0 = (self.lon1 + self.lon2) / 2
 
@@ -288,7 +332,6 @@ class Base:
             x, y = lon, lat
             if symbolic:
                 distances = ca.sqrt(x**2 + y**2)
-                #bearing = ca.atan2(x, y) * 180 / 3.14159
                 bearing = ca.arctan2(x, y) * 180 / 3.14159
                 lat, lon = oc.aero.latlon(lat0, lon0, distances, bearing)
             else:
@@ -311,16 +354,15 @@ class Base:
                         self.aircraft.get("ceiling", h_cr))
                 h_cr = min(h_cr, ceiling * 0.85, 12500)  # Cap at ~FL410
 
-            xp_0, yp_0 = self.proj(self.lon1, self.lat1)
-            xp_f, yp_f = self.proj(self.lon2, self.lat2)
-            xp_guess = np.linspace(xp_0, xp_f, self.nodes + 1)
-            yp_guess = np.linspace(yp_0, yp_f, self.nodes + 1)
+            # Great-circle intermediate points in radians
+            lat_guess, lon_guess = self._gc_intermediate_points(self.nodes + 1)
             h_guess = h_cr * np.ones(self.nodes + 1)
         else:
-            xp_guess, yp_guess = self.proj(flight.longitude, flight.latitude)
+            lat_guess = np.deg2rad(np.asarray(flight.latitude, dtype=float))
+            lon_guess = np.deg2rad(np.asarray(flight.longitude, dtype=float))
             #Altitude sanity check
             h_guess = flight.altitude * ft
-            
+
             # Clamp to reasonable bounds
             if self.perf_model.lower() == "bada3":
                 ceiling = self.aircraft.get("ceiling", 13000)
@@ -336,7 +378,7 @@ class Base:
                     flight.timestamp - flight.timestamp.min()
                 ).dt.total_seconds()
 
-        return np.vstack([xp_guess, yp_guess, h_guess, m_guess, ts_guess]).T
+        return np.vstack([lat_guess, lon_guess, h_guess, m_guess, ts_guess]).T
 
     def enable_wind(self, windfield: pd.DataFrame, use_bspline=False,
                     wind_method="linear", bspline_degree=3, bspline_subsample=1,
@@ -372,7 +414,6 @@ class Base:
         if use_bspline:
             self.wind = tools.BSplineWind(
                 windfield,
-                self.proj,
                 self.lat1,
                 self.lon1,
                 self.lat2,
@@ -385,7 +426,7 @@ class Base:
             )
         else:
             self.wind = tools.PolyWind(
-                windfield, self.proj, self.lat1, self.lon1, self.lat2, self.lon2
+                windfield, self.lat1, self.lon1, self.lat2, self.lon2
             )
 
     def change_engine(self, engtype):
@@ -453,29 +494,35 @@ class Base:
         return C, D, B
 
     def xdot(self, x, u) -> ca.MX:
-        """Ordinary differential equation for cruising
+        """Spherical-earth ODE for cruising flight.
 
-        Args:
-            x (ca.MX): States [x position (m), y position (m), height (m), mass (kg)]
-            u (ca.MX): Controls [mach number, vertical speed (m/s), heading (rad)]
+        States are geographic: lat (rad), lon (rad), h (m), m (kg), ts (s).
+        Controls: mach, vs (m/s), psi – true heading from north (rad, CW).
 
-        Returns:
-            ca.MX: State direvatives
+        Returns
+        -------
+        ca.MX  :  [dlat, dlon, dh, dm, dt]  (rad/s, rad/s, m/s, kg/s, s/s)
         """
-        xp, yp, h, m, ts = x[0], x[1], x[2], x[3], x[4]
+        lat, lon, h, m, ts = x[0], x[1], x[2], x[3], x[4]
         mach, vs, psi = u[0], u[1], u[2]
 
         v = oc.aero.mach2tas(mach, h, dT=self.dT)
-        #gamma = ca.atan2(vs, v)
         gamma = ca.arctan2(vs, v)
 
-        dx = v * ca.sin(psi) * ca.cos(gamma)
-        if self.wind is not None:
-            dx += self.wind.calc_u(xp, yp, h, ts)
+        # Ground-speed components (m/s) before wind
+        v_north = v * ca.cos(psi) * ca.cos(gamma)   # northward
+        v_east  = v * ca.sin(psi) * ca.cos(gamma)   # eastward
 
-        dy = v * ca.cos(psi) * ca.cos(gamma)
         if self.wind is not None:
-            dy += self.wind.calc_v(xp, yp, h, ts)
+            # Wind interpolants expect degrees – convert from radian states
+            lat_deg = lat * (180.0 / np.pi)
+            lon_deg = lon * (180.0 / np.pi)
+            v_north += self.wind.calc_v(lat_deg, lon_deg, h, ts)  # northward wind
+            v_east  += self.wind.calc_u(lat_deg, lon_deg, h, ts)  # eastward  wind
+
+        # Spherical geodesic rates (rad/s)
+        dlat = v_north / (R_EARTH + h)
+        dlon = v_east  / ((R_EARTH + h) * ca.cos(lat))
 
         dh = vs
 
@@ -483,7 +530,7 @@ class Base:
 
         dt = 1
 
-        return ca.vertcat(dx, dy, dh, dm, dt)
+        return ca.vertcat(dlat, dlon, dh, dm, dt)
 
     def setup(
         self,
@@ -542,9 +589,9 @@ class Base:
     def init_model(self, objective, **kwargs):
         autoscale_cost = kwargs.get("auto_scale_cost", False)
 
-        # Model variables
-        xp = ca.MX.sym("xp")
-        yp = ca.MX.sym("yp")
+        # Model variables (geographic states in radians)
+        lat = ca.MX.sym("lat")
+        lon = ca.MX.sym("lon")
         h = ca.MX.sym("h")
         m = ca.MX.sym("m")
         ts = ca.MX.sym("ts")
@@ -553,7 +600,7 @@ class Base:
         vs = ca.MX.sym("vs")
         psi = ca.MX.sym("psi")
 
-        self.x = ca.vertcat(xp, yp, h, m, ts)
+        self.x = ca.vertcat(lat, lon, h, m, ts)
         self.u = ca.vertcat(mach, vs, psi)
 
         self.ts_final = ca.MX.sym("ts_final")
@@ -594,7 +641,7 @@ class Base:
     def _calc_emission(self, x, u, symbolic=True):
         if self.perf_model.lower() == "bada3":
             raise NotImplementedError("Emission calculations not available with BADA3 performance model")
-        xp, yp, h, m = x[0], x[1], x[2], x[3]
+        xp, yp, h, m = x[0], x[1], x[2], x[3]  # lat_deg, lon_deg, h, mass
         mach, vs, psi = u[0], u[1], u[2]
 
         if symbolic:
@@ -622,10 +669,10 @@ class Base:
     def obj_fuel(self, x, u, dt, symbolic=True, **kwargs):
         """
         Fuel objective (kg) over one collocation interval.
-        x = [xp, yp, h, m, ts], u = [mach, vs, psi]
+        x = [lat, lon, h, m, ts], u = [mach, vs, psi]
         """
         # unpack states and controls
-        xp, yp, h, m, ts = x[0], x[1], x[2], x[3], x[4]
+        lat, lon, h, m, ts = x[0], x[1], x[2], x[3], x[4]
         mach, vs, psi = u[0], u[1], u[2]
 
         # Choose aero conversion and fuelflow backend based on mode
@@ -755,7 +802,7 @@ class Base:
         Calculate the cost of the grid object.
 
         Parameters:
-        x (ca.MX): State vector [xp, yp, h, m, ts].
+        x (ca.MX): State vector [lat, lon, h, m, ts] (lat/lon in radians).
         u (ca.MX): Control vector [mach, vs, psi].
         dt (ca.MX): Time step.
 
@@ -773,7 +820,7 @@ class Base:
         AssertionError: If n_dim is not 3 or 4.
         """
 
-        xp, yp, h, m, ts = x[0], x[1], x[2], x[3], x[4]
+        lat_rad, lon_rad, h, m, ts = x[0], x[1], x[2], x[3], x[4]
 
         interpolant = kwargs.get("interpolant", None)
         symbolic = kwargs.get("symbolic", True)
@@ -784,7 +831,9 @@ class Base:
         #self.solver_options["ipopt.hessian_approximation"] = "limited-memory"
         self.solver_options["ipopt.hessian_approximation"] = "exact"
 
-        lon, lat = self.proj(xp, yp, inverse=True, symbolic=symbolic)
+        # Convert radian states to degrees for the interpolant grid
+        lon = lon_rad * (180.0 / np.pi)
+        lat = lat_rad * (180.0 / np.pi)
 
         if n_dim == 3:
             input_data = [lon, lat, h]
@@ -848,7 +897,7 @@ class Base:
         n_dim = kwargs.get("n_dim", 4)
 
         # Extract optimised states and controls
-        X = x_opt.full() # [xp, yp, h, mass, ts]
+        X = x_opt.full() # [lat_rad, lon_rad, h, mass, ts]
         U = u_opt.full() # [mach, vs, psi]
 
         # Extrapolate the final control point, Uf
@@ -863,10 +912,11 @@ class Base:
         self.U = U
         self.dt = ts_final / (n - 1)
 
-        xp, yp, h, mass, ts = X
+        xp, yp, h, mass, ts = X  # xp=lat_rad, yp=lon_rad
         mach, vs, psi = U
-        # Convert to readable format
-        lon, lat = self.proj(xp, yp, inverse=True) # Convert back to lat/lon
+        # Convert radian states to degrees for output
+        lat = np.rad2deg(np.asarray(xp).squeeze())
+        lon = np.rad2deg(np.asarray(yp).squeeze())
         ts_ = np.linspace(0, ts_final, n).round(4)
         tas = (openap.aero.mach2tas(mach, h, dT=self.dT) / kts).round(4) # Convert Mach to TAS
         alt = (h / ft).round() # Convert to feet
@@ -963,8 +1013,8 @@ class Base:
             )   
 
         if self.wind:
-            wu = self.wind.calc_u(xp, yp, h, ts)
-            wv = self.wind.calc_v(xp, yp, h, ts)
+            wu = self.wind.calc_u(lat, lon, h, ts)
+            wv = self.wind.calc_v(lat, lon, h, ts)
             df = df.assign(wu=wu, wv=wv)
 
         return df

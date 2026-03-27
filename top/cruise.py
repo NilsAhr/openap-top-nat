@@ -32,15 +32,25 @@ class Cruise(Base):
         self.allow_descent = True
 
     def init_conditions(self, **kwargs):
-        """Initialize direct collocation bounds and guesses."""
+        """Initialize direct collocation bounds and guesses.
 
-        # Convert lat/lon to cartisian coordinates.
-        xp_0, yp_0 = self.proj(self.lon1, self.lat1)
-        xp_f, yp_f = self.proj(self.lon2, self.lat2)
-        x_min = min(xp_0, xp_f) - 10_000
-        x_max = max(xp_0, xp_f) + 10_000
-        y_min = min(yp_0, yp_f) - 10_000
-        y_max = max(yp_0, yp_f) + 10_000
+        States are now [lat (rad), lon (rad), h (m), m (kg), ts (s)].
+        """
+
+        # Origin / destination in radians (state coordinates)
+        d2r = pi / 180.0
+        lat_0 = self.lat1 * d2r
+        lon_0 = self.lon1 * d2r
+        lat_f = self.lat2 * d2r
+        lon_f = self.lon2 * d2r
+
+        # Bounding box in radians with generous margins
+        lat_margin = 10.0 * d2r   # ~10 deg (~1100 km)
+        lon_margin = 15.0 * d2r   # ~15 deg (wider – longitude shrinks at high lat)
+        lat_min = min(lat_0, lat_f) - lat_margin
+        lat_max = max(lat_0, lat_f) + lat_margin
+        lon_min = min(lon_0, lon_f) - lon_margin
+        lon_max = max(lon_0, lon_f) + lon_margin
 
         ts_min = 0
         ts_max = max(5, self.range / 1000 / 500) * 3600
@@ -54,16 +64,16 @@ class Cruise(Base):
         psi = hdg * pi / 180
 
         # Initial conditions - Lower upper bounds
-        self.x_0_lb = [xp_0, yp_0, h_min, self.mass_init, ts_min]
-        self.x_0_ub = [xp_0, yp_0, h_max, self.mass_init, ts_min]
+        self.x_0_lb = [lat_0, lon_0, h_min, self.mass_init, ts_min]
+        self.x_0_ub = [lat_0, lon_0, h_max, self.mass_init, ts_min]
 
         # Final conditions - Lower and upper bounds
-        self.x_f_lb = [xp_f, yp_f, h_min, self.oew, ts_min]
-        self.x_f_ub = [xp_f, yp_f, h_max, self.mass_init, ts_max]
+        self.x_f_lb = [lat_f, lon_f, h_min, self.oew, ts_min]
+        self.x_f_ub = [lat_f, lon_f, h_max, self.mass_init, ts_max]
 
         # States - Lower and upper bounds
-        self.x_lb = [x_min, y_min, h_min, self.oew, ts_min]
-        self.x_ub = [x_max, y_max, h_max, self.mass_init, ts_max]
+        self.x_lb = [lat_min, lon_min, h_min, self.oew, ts_min]
+        self.x_ub = [lat_max, lon_max, h_max, self.mass_init, ts_max]
 
         # Control init - lower and upper bounds
         self.u_0_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
@@ -130,8 +140,12 @@ class Cruise(Base):
                 headings = np.zeros(self.nodes)
                 for i in range(self.nodes):
                     i_next = min(i + 1, n_pts - 1)
-                    dx = self.x_guess[i_next, 0] - self.x_guess[i, 0]
-                    dy = self.x_guess[i_next, 1] - self.x_guess[i, 1]
+                    dlat = self.x_guess[i_next, 0] - self.x_guess[i, 0]
+                    dlon = self.x_guess[i_next, 1] - self.x_guess[i, 1]
+                    lat_i = self.x_guess[i, 0]
+                    # Approximate east/north displacements from radian diffs
+                    dx = dlon * np.cos(lat_i)  # east (lat already in rad)
+                    dy = dlat                    # north
                     headings[i] = np.arctan2(dx, dy)  # radians, from north
                 self.u_guess_array = [
                     [self.u_guess[0], self.u_guess[1], headings[i]]
