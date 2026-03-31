@@ -7,7 +7,7 @@ import openap.casadi as oc
 import pandas as pd
 from openap.extra.aero import fpm, ft, kts
 
-from .base import Base
+from .base import Base, R_EARTH
 
 
 class Cruise(Base):
@@ -167,6 +167,13 @@ class Cruise(Base):
         lbg = []  # Constraint lb value
         ubg = []  # Constraint ub value
 
+        # Diagonal scaling for collocation constraints.
+        # lat/lon ODE residuals are O(1e-5 rad/s) while h,m,ts are O(1).
+        # Multiplying the lat/lon rows by R_EARTH makes all rows O(m/s),
+        # dramatically improving IPOPT conditioning without changing the
+        # feasible set (scaling a zero-equality by a constant).
+        _cscale = ca.vertcat(R_EARTH, R_EARTH, 1, 1, 1)
+
         # For plotting x and u given w
         X = []
         U = []
@@ -220,9 +227,9 @@ class Cruise(Base):
                 for r in range(self.polydeg):
                     xpc = xpc + C[r + 1, j] * Xc[r]
 
-                # Append collocation equations
+                # Append collocation equations (scaled)
                 fj, qj = self.func_dynamics(Xc[j - 1], Uk)
-                g.append(self.dt * fj - xpc)
+                g.append(_cscale * (self.dt * fj - xpc))
                 lbg.append([0] * nstates)
                 ubg.append([0] * nstates)
 
@@ -251,8 +258,8 @@ class Cruise(Base):
 
             w0.append(self.x_guess[k + 1])
 
-            # Add equality constraint
-            g.append(Xk_end - Xk)
+            # Add equality constraint (scaled)
+            g.append(_cscale * (Xk_end - Xk))
             lbg.append([0] * nstates)
             ubg.append([0] * nstates)
 
