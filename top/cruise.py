@@ -76,16 +76,17 @@ class Cruise(Base):
         self.x_ub = [lat_max, lon_max, h_max, self.mass_init, ts_max]
 
         # Control init - lower and upper bounds
-        self.u_0_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
+        #self.u_0_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
+        self.u_0_lb = [0.7, -500 * fpm, psi - pi / 4]
         self.u_0_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
 
         # Control final - lower and upper bounds
-        self.u_f_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
+        #self.u_f_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
+        self.u_f_lb = [0.7, -500 * fpm, psi - pi / 4]
         self.u_f_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
 
         # Control - Lower and upper bound
-        self.u_lb = [0.5, -500 * fpm, psi - pi / 2]
-        #self.u_lb = [self.mach_max - 0.15, -500 * fpm, psi - pi / 2]
+        self.u_lb = [0.7, -500 * fpm, psi - pi / 2]
         self.u_ub = [self.mach_max, 500 * fpm, psi + pi / 2]
 
         # Initial guess - states
