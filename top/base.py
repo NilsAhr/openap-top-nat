@@ -341,9 +341,63 @@ class Base:
 
             return lon, lat
 
+    def _max_feasible_altitude(self, mass, mach=None):
+        """Find the highest altitude where thrust and lift constraints
+        are satisfied for the given *mass* and *mach*.
+
+        Scans from FL420 downward in 100 ft steps.  Returns height in
+        metres, or ``h_min`` (FL200) if nothing is feasible.
+        """
+        from openap.extra.aero import ft as _ft, kts as _kts
+        if mach is None:
+            mach = self.mach_max - 0.03  # same as control initial guess
+
+        S = self.aircraft["wing"]["area"]
+        cd0 = self.drag.polar["clean"]["cd0"]
+        ck = self.drag.polar["clean"]["k"]
+        g0 = 9.80665
+        W = mass * g0
+
+        for alt_fl in range(420, 199, -1):            # FL420 → FL200
+            h = alt_fl * 100 * _ft
+            v = float(openap.aero.mach2tas(mach, h))
+            tas_kn = v / _kts
+            rho = float(openap.aero.density(h))
+            T = float(np.asarray(self.thrust.cruise(tas_kn, alt_fl * 100)).flatten()[0])
+            D = float(np.asarray(self.drag.clean(mass, tas_kn, alt_fl * 100)).flatten()[0])
+
+            # Same margins as the NLP constraints
+            if T * 0.95 - D <= 0:
+                continue
+            D_max = T * 0.9
+            cd_max = D_max / (0.5 * rho * v ** 2 * S + 1e-10)
+            cl_max_sq = (cd_max - cd0) / ck
+            if cl_max_sq <= 0:
+                continue
+            L_max = np.sqrt(cl_max_sq) * 0.5 * rho * v ** 2 * S
+            if L_max * 0.8 > W:
+                return h
+
+        return 20_000 * _ft          # fallback to FL200
+
     def initial_guess(self, flight: pd.DataFrame = None):
-        m_guess = self.mass_init * np.ones(self.nodes + 1)
-        ts_guess = np.linspace(0, 12 * 3600, self.nodes + 1)
+        # --- Estimate flight time from cruise TAS -------------------------
+        mach_guess = self.mach_max - 0.03          # same Mach as control guess
+        # Use a rough initial-guess altitude (will be refined below)
+        h_rough = min(self.aircraft["cruise"]["height"], 11000)
+        tas_guess = float(openap.aero.mach2tas(mach_guess, h_rough))  # m/s
+        t_flight = float(self.range) / max(tas_guess, 100)            # seconds
+        ts_guess = np.linspace(0, t_flight, self.nodes + 1)
+
+        # --- Estimate mass profile (linear burn) --------------------------
+        # Rough fuel-flow estimate: ~2.5 kg/s for a wide-body at cruise
+        ff_guess = 2.5  # kg/s  (conservative average for B772/B77W class)
+        fuel_total_guess = ff_guess * t_flight
+        # Don't let the guess burn more than 60% of initial mass
+        fuel_total_guess = min(fuel_total_guess, self.mass_init * 0.6)
+        m_guess = np.linspace(self.mass_init,
+                              self.mass_init - fuel_total_guess,
+                              self.nodes + 1)
 
         if flight is None:
             h_cr = self.aircraft["cruise"]["height"]
@@ -354,9 +408,30 @@ class Base:
                         self.aircraft.get("ceiling", h_cr))
                 h_cr = min(h_cr, ceiling * 0.85, 12500)  # Cap at ~FL410
 
+            # Ensure the initial-guess altitude is actually feasible for
+            # the initial mass.  The database cruise height is often only
+            # reachable at mid-flight mass, not at heavy MTOW fractions.
+            h_feas = self._max_feasible_altitude(self.mass_init)
+            if h_feas < h_cr:
+                if hasattr(self, 'debug') and self.debug:
+                    print(f"initial_guess: h_cr={h_cr:.0f} m (FL{h_cr/0.3048/100:.0f}) "
+                          f"infeasible at {self.mass_init:.0f} kg – "
+                          f"capping to {h_feas:.0f} m (FL{h_feas/0.3048/100:.0f})")
+                h_cr = h_feas
+
             # Great-circle intermediate points in radians
             lat_guess, lon_guess = self._gc_intermediate_points(self.nodes + 1)
-            h_guess = h_cr * np.ones(self.nodes + 1)
+
+            # Use a gently rising altitude profile: start at the
+            # mass-feasible altitude, end at the database cruise height
+            # (the aircraft gets lighter as it burns fuel).
+            h_start = self._max_feasible_altitude(self.mass_init)
+            h_end = min(h_cr, self._max_feasible_altitude(
+                self.mass_init - fuel_total_guess))
+            h_guess = np.linspace(h_start, h_end, self.nodes + 1)
+            if hasattr(self, 'debug') and self.debug:
+                print(f"initial_guess: altitude ramp FL{h_start/0.3048/100:.0f} "
+                      f"→ FL{h_end/0.3048/100:.0f}")
         else:
             lat_guess = np.deg2rad(np.asarray(flight.latitude, dtype=float))
             lon_guess = np.deg2rad(np.asarray(flight.longitude, dtype=float))
@@ -554,7 +629,7 @@ class Base:
 
         max_iteration = kwargs.get("max_iteration", kwargs.get("max_iterations", 3000))
         tol = kwargs.get("tol", 1e-6)
-        acceptable_tol = kwargs.get("acceptable_tol", 1e-4)
+        acceptable_tol = kwargs.get("acceptable_tol", 1e-3)
         alpha_for_y = kwargs.get("alpha_for_y", "primal-and-full")
         #hessian_approximation = kwargs.get("hessian_approximation", "limited-memory")
         hessian_approximation = kwargs.get("hessian_approximation", "exact")
@@ -578,6 +653,9 @@ class Base:
             "ipopt.fixed_variable_treatment": "relax_bounds",
             "ipopt.tol": tol,
             "ipopt.acceptable_tol": acceptable_tol,
+            "ipopt.acceptable_iter": 5,            # accept after 5 near-converged iters
+            "ipopt.acceptable_constr_viol_tol": 100,  # ~100 m acceptable constraint viol
+            "ipopt.nlp_scaling_method": "gradient-based",
             "ipopt.mu_strategy": "adaptive",
             "ipopt.alpha_for_y": alpha_for_y,
             "ipopt.hessian_approximation": hessian_approximation,
