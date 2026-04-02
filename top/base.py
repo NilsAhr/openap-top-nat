@@ -27,7 +27,7 @@ class Base:
         actype: str,
         origin: Union[str, tuple],
         destination: Union[str, tuple],
-        m0: float = 0.95,
+        m0: float = 0.85,
         dT: float = 0.0,
         use_synonym=False,
         perf_model: str = "openap",
@@ -40,7 +40,7 @@ class Base:
             actype (str): ICAO aircraft type code
             origin (Union[str, tuple]): ICAO or IATA code of airport, or tuple (lat, lon)
             destination (Union[str, tuple]): ICAO or IATA code of airport, or tuple (lat, lon)
-            m0 (float, optional): Takeoff mass factor. Defaults to 0.95 (of MTOW).
+            m0 (float, optional): Takeoff mass factor. Defaults to 0.85 (of MTOW).
             dT (float, optional): Temperature shift from standard ISA. Default = 0
             use_synonym (bool, optional): Use aircraft synonym database to find similar aircraft if actype is not found. Defaults to False.
             perf_model (str, optional): Performance model to use ('openap' or 'bada3'). Defaults to 'openap'.

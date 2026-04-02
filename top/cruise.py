@@ -58,7 +58,10 @@ class Cruise(Base):
         h_max = kwargs.get("h_max", self.aircraft["limits"]["ceiling"])
         #h_max = kwargs.get("h_cruise", self.aircraft["limits"]["h_cruise"]) # 0.85 from ceiling
         #h_min = kwargs.get("h_min", 15_000 * ft)
-        h_min = kwargs.get("h_min", 30_000 * ft)
+        h_min = kwargs.get("h_min", 20_000 * ft)
+
+        # Optional: pin Mach to a specific value (overrides normal bounds)
+        fixed_mach = kwargs.get("fixed_mach", None)
 
         # Initial bearing (departure) and final bearing (arrival) on GC
         hdg = oc.aero.bearing(self.lat1, self.lon1, self.lat2, self.lon2)
@@ -78,20 +81,30 @@ class Cruise(Base):
         self.x_lb = [lat_min, lon_min, h_min, self.oew, ts_min]
         self.x_ub = [lat_max, lon_max, h_max, self.mass_init, ts_max]
 
+        if fixed_mach is not None:
+            # Pin Mach: lb == ub == fixed_mach on every node
+            self.fix_mach = True
+            mach_lo = fixed_mach
+            mach_hi = fixed_mach
+            mach_guess = fixed_mach
+        else:
+            mach_lo_init = self.mach_max - 0.06
+            mach_hi = self.mach_max
+            mach_lo_mid = 0.78
+            mach_guess = self.mach_max - 0.03
+
         # Control init - lower and upper bounds (use initial bearing)
-        #self.u_0_lb = [0.7, -500 * fpm, psi - pi / 4]
-        self.u_0_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
-        self.u_0_ub = [self.mach_max, 500 * fpm, psi + pi / 4]
+        self.u_0_lb = [fixed_mach or mach_lo_init, -500 * fpm, psi - pi / 4]
+        self.u_0_ub = [fixed_mach or mach_hi, 500 * fpm, psi + pi / 4]
 
         # Control final - lower and upper bounds (use FINAL bearing)
-        #self.u_f_lb = [self.mach_max - 0.06, -500 * fpm, psi - pi / 4]
-        self.u_f_lb = [0.7, -500 * fpm, psi_f - pi / 4]
-        self.u_f_ub = [self.mach_max, 500 * fpm, psi_f + pi / 4]
+        self.u_f_lb = [fixed_mach or mach_lo_mid, -500 * fpm, psi_f - pi / 4]
+        self.u_f_ub = [fixed_mach or mach_hi, 500 * fpm, psi_f + pi / 4]
 
         # Control - Lower and upper bound (wide enough for full GC arc)
         psi_mid = (psi + psi_f) / 2
-        self.u_lb = [0.7, -500 * fpm, psi_mid - pi / 2]
-        self.u_ub = [self.mach_max, 500 * fpm, psi_mid + pi / 2]
+        self.u_lb = [fixed_mach or mach_lo_mid, -500 * fpm, psi_mid - pi / 2]
+        self.u_ub = [fixed_mach or mach_hi, 500 * fpm, psi_mid + pi / 2]
 
         # Initial guess - states
         self.x_guess = self.initial_guess()
@@ -101,10 +114,10 @@ class Cruise(Base):
         # so that the guess is consistent with the GC state guess.
         psi_guess = np.linspace(float(psi), float(psi_f), self.nodes)
         self.u_guess_array = [
-            [self.mach_max - 0.03, 0, psi_guess[i]]
+            [mach_guess, 0, psi_guess[i]]
             for i in range(self.nodes)
         ]
-        self.u_guess = [self.mach_max - 0.03, 0, float(psi)]  # scalar fallback
+        self.u_guess = [mach_guess, 0, float(psi)]  # scalar fallback
 
     def trajectory(self, objective="fuel", **kwargs) -> pd.DataFrame:
         """
