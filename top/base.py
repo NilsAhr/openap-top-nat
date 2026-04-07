@@ -15,6 +15,19 @@ from .perf import make_bada3_backend
 # Mean Earth radius (m) for spherical geodesic ODE
 R_EARTH = 6.371e6
 
+# ── NLP state-variable scaling ──────────────────────────────────────────
+# Physical → Scaled:  x_s  = x_phys * S_X
+# Scaled → Physical:  x_ph = x_s    * S_X_INV
+#
+# Target: every scaled state ≈ O(1) so that the Hessian is well-conditioned.
+#   lat (rad) ≈ 0.7–1.1  →  × 10     →  7–11
+#   lon (rad) ≈ −1.2–0.1 →  × 10     →  −12–1
+#   h   (m)   ≈ 6 000–13 000  → × 1e-4 →  0.6–1.3
+#   m   (kg)  ≈ 50 000–350 000 → × 1/70 000 → 0.7–5
+#   ts  (s)   – not scaled (user may add later)
+S_X     = np.array([10.0,  10.0,  1e-4,       1.0 / 70_000, 1.0])
+S_X_INV = 1.0 / S_X   # [0.1, 0.1, 10000, 70000, 1]
+
 try:
     from . import tools
 except Exception:
@@ -453,7 +466,9 @@ class Base:
                     flight.timestamp - flight.timestamp.min()
                 ).dt.total_seconds()
 
-        return np.vstack([lat_guess, lon_guess, h_guess, m_guess, ts_guess]).T
+        # Scale to NLP units: x_s = x_phys * S_X
+        x_phys = np.vstack([lat_guess, lon_guess, h_guess, m_guess, ts_guess]).T
+        return x_phys * S_X[np.newaxis, :]   # broadcast (N, 5) * (1, 5)
 
     def enable_wind(self, windfield: pd.DataFrame, use_bspline=False,
                     wind_method="linear", bspline_degree=3, bspline_subsample=1,
@@ -667,18 +682,18 @@ class Base:
     def init_model(self, objective, **kwargs):
         autoscale_cost = kwargs.get("auto_scale_cost", False)
 
-        # Model variables (geographic states in radians)
-        lat = ca.MX.sym("lat")
-        lon = ca.MX.sym("lon")
-        h = ca.MX.sym("h")
-        m = ca.MX.sym("m")
-        ts = ca.MX.sym("ts")
+        # ── Scaling vectors (CasADi) ─────────────────────────────────────
+        s_x     = ca.vertcat(*S_X.tolist())       # physical → scaled
+        s_x_inv = ca.vertcat(*S_X_INV.tolist())    # scaled → physical
 
+        # ── Scaled state symbol (NLP decision variable) ──────────────────
+        # The NLP sees x_s = x_phys * s_x.
+        self.x = ca.MX.sym("x_s", 5)
+
+        # Controls (not scaled)
         mach = ca.MX.sym("mach")
-        vs = ca.MX.sym("vs")
-        psi = ca.MX.sym("psi")
-
-        self.x = ca.vertcat(lat, lon, h, m, ts)
+        vs   = ca.MX.sym("vs")
+        psi  = ca.MX.sym("psi")
         self.u = ca.vertcat(mach, vs, psi)
 
         self.ts_final = ca.MX.sym("ts_final")
@@ -686,7 +701,10 @@ class Base:
         # Control discretization
         self.dt = self.ts_final / self.nodes
 
-        # Handel objective function
+        # ── Unscale to physical for dynamics & objective ──────────────────
+        x_phys = self.x * s_x_inv  # element-wise: x_phys_i = x_s_i / S_i
+
+        # Handle objective function
         if isinstance(objective, Callable):
             self.objective = objective
         elif objective.lower().startswith("ci:"):
@@ -696,21 +714,27 @@ class Base:
         else:
             self.objective = getattr(self, f"obj_{objective}")
 
-        L = self.objective(self.x, self.u, self.dt, **kwargs)
+        # Objective evaluated on *physical* states
+        L = self.objective(x_phys, self.u, self.dt, **kwargs)
 
         if autoscale_cost:
-            # scale objective based on initial guess
-            x0 = self.x_guess.T
-            u0 = self.u_guess
+            # Normalise objective by initial-guess cost
+            x0_s = self.x_guess.T                     # scaled
+            x0_phys = x0_s * S_X_INV[:, np.newaxis]   # unscale for numeric eval
+            u0  = self.u_guess
             dt0 = self.range / 200 / self.nodes
-            cost = np.sum(self.objective(x0, u0, dt0, symbolic=False, **kwargs))
+            cost = np.sum(self.objective(x0_phys, u0, dt0, symbolic=False, **kwargs))
             L = L / cost * 1e3
 
-        # Continuous time dynamics
+        # ── Dynamics in physical space, then scale the rates ─────────────
+        f_phys  = self.xdot(x_phys, self.u)   # d(x_phys)/dt
+        f_scaled = f_phys * s_x                # d(x_s)/dt = S * d(x_phys)/dt
+
+        # ── func_dynamics: maps (x_scaled, u) → (xdot_scaled, L) ─────────
         self.func_dynamics = ca.Function(
             "f",
             [self.x, self.u],
-            [self.xdot(self.x, self.u), L],
+            [f_scaled, L],
             ["x", "u"],
             ["xdot", "L"],
             {"allow_free": True},
@@ -940,15 +964,16 @@ class Base:
         if isinstance(obj2, str):
             obj2 = getattr(self, f"obj_{obj2}")
 
-        x0 = self.x_guess.T
+        # x_guess is in scaled NLP units; objectives expect physical states
+        x0_phys = self.x_guess.T * S_X_INV[:, np.newaxis]
         u0 = self.u_guess
         dt0 = self.range / 200 / self.nodes
 
         kwargs_ = kwargs.copy()
         kwargs_["symbolic"] = False
 
-        n1 = obj1(x0, u0, dt0, **kwargs_).sum()
-        n2 = obj2(x0, u0, dt0, **kwargs_).sum()
+        n1 = obj1(x0_phys, u0, dt0, **kwargs_).sum()
+        n2 = obj2(x0_phys, u0, dt0, **kwargs_).sum()
 
         c1 = obj1(x, u, dt, **kwargs)
         c2 = obj2(x, u, dt, **kwargs)
@@ -974,9 +999,10 @@ class Base:
         time_dependent = kwargs.get("time_dependent", True)
         n_dim = kwargs.get("n_dim", 4)
 
-        # Extract optimised states and controls
-        X = x_opt.full() # [lat_rad, lon_rad, h, mass, ts]
-        U = u_opt.full() # [mach, vs, psi]
+        # Extract optimised states (scaled) and unscale to physical
+        X = x_opt.full()                           # [lat_s, lon_s, h_s, m_s, ts]
+        X = X * S_X_INV[:, np.newaxis]              # → [lat_rad, lon_rad, h_m, m_kg, ts_s]
+        U = u_opt.full()                            # [mach, vs, psi] (not scaled)
 
         # Extrapolate the final control point, Uf
         U2 = U[:, -2:-1]

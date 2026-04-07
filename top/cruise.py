@@ -7,7 +7,7 @@ import openap.casadi as oc
 import pandas as pd
 from openap.extra.aero import fpm, ft, kts
 
-from .base import Base, R_EARTH
+from .base import Base, R_EARTH, S_X, S_X_INV
 
 
 class Cruise(Base):
@@ -34,8 +34,13 @@ class Cruise(Base):
     def init_conditions(self, **kwargs):
         """Initialize direct collocation bounds and guesses.
 
-        States are now [lat (rad), lon (rad), h (m), m (kg), ts (s)].
+        States are now **scaled**:
+          [lat_rad*S_lat, lon_rad*S_lon, h_m*S_h, m_kg*S_m, ts_s*S_ts]
+        See ``S_X`` / ``S_X_INV`` in base.py for the numeric values.
         """
+
+        # ── helpers ─────────────────────────────────────────────────
+        Sl, So, Sh, Sm, St = S_X          # 10, 10, 1e-4, 1/70000, 1
 
         # Origin / destination in radians (state coordinates)
         d2r = pi / 180.0
@@ -69,17 +74,18 @@ class Cruise(Base):
         hdg_final = (oc.aero.bearing(self.lat2, self.lon2, self.lat1, self.lon1) + 180) % 360
         psi_f = hdg_final * pi / 180
 
+        # ── ALL state bounds are in SCALED units ────────────────────
         # Initial conditions - Lower upper bounds
-        self.x_0_lb = [lat_0, lon_0, h_min, self.mass_init, ts_min]
-        self.x_0_ub = [lat_0, lon_0, h_max, self.mass_init, ts_min]
+        self.x_0_lb = [lat_0*Sl, lon_0*So, h_min*Sh, self.mass_init*Sm, ts_min*St]
+        self.x_0_ub = [lat_0*Sl, lon_0*So, h_max*Sh, self.mass_init*Sm, ts_min*St]
 
         # Final conditions - Lower and upper bounds
-        self.x_f_lb = [lat_f, lon_f, h_min, self.oew, ts_min]
-        self.x_f_ub = [lat_f, lon_f, h_max, self.mass_init, ts_max]
+        self.x_f_lb = [lat_f*Sl, lon_f*So, h_min*Sh, self.oew*Sm, ts_min*St]
+        self.x_f_ub = [lat_f*Sl, lon_f*So, h_max*Sh, self.mass_init*Sm, ts_max*St]
 
         # States - Lower and upper bounds
-        self.x_lb = [lat_min, lon_min, h_min, self.oew, ts_min]
-        self.x_ub = [lat_max, lon_max, h_max, self.mass_init, ts_max]
+        self.x_lb = [lat_min*Sl, lon_min*So, h_min*Sh, self.oew*Sm, ts_min*St]
+        self.x_ub = [lat_max*Sl, lon_max*So, h_max*Sh, self.mass_init*Sm, ts_max*St]
 
         if fixed_mach is not None:
             # Pin Mach: lb == ub == fixed_mach on every node
@@ -106,7 +112,7 @@ class Cruise(Base):
         self.u_lb = [fixed_mach or mach_lo_mid, -500 * fpm, psi_mid - pi / 2]
         self.u_ub = [fixed_mach or mach_hi, 500 * fpm, psi_mid + pi / 2]
 
-        # Initial guess - states
+        # Initial guess - states  (already in SCALED units from base.py)
         self.x_guess = self.initial_guess()
 
         # Initial guess - controls
@@ -161,18 +167,22 @@ class Cruise(Base):
         if initial_guess is not None:
             self.x_guess = self.initial_guess(initial_guess)
 
-            # Compute per-node heading guesses from the deviated positions
-            # so that the control guess is consistent with the state guess.
+            # Compute per-node heading guesses from the deviated positions.
+            # x_guess is in SCALED units; unscale lat/lon for trig.
             n_pts = len(self.x_guess)
             if n_pts >= 2:
                 headings = np.zeros(self.nodes)
                 for i in range(self.nodes):
                     i_next = min(i + 1, n_pts - 1)
-                    dlat = self.x_guess[i_next, 0] - self.x_guess[i, 0]
-                    dlon = self.x_guess[i_next, 1] - self.x_guess[i, 1]
-                    lat_i = self.x_guess[i, 0]
+                    # Unscale lat/lon to radians for heading computation
+                    lat_i  = self.x_guess[i, 0] * S_X_INV[0]   # / S_lat
+                    lat_nx = self.x_guess[i_next, 0] * S_X_INV[0]
+                    lon_i  = self.x_guess[i, 1] * S_X_INV[1]
+                    lon_nx = self.x_guess[i_next, 1] * S_X_INV[1]
+                    dlat = lat_nx - lat_i
+                    dlon = lon_nx - lon_i
                     # Approximate east/north displacements from radian diffs
-                    dx = dlon * np.cos(lat_i)  # east (lat already in rad)
+                    dx = dlon * np.cos(lat_i)  # east
                     dy = dlat                    # north
                     headings[i] = np.arctan2(dx, dy)  # radians, from north
                 self.u_guess_array = [
@@ -194,12 +204,14 @@ class Cruise(Base):
         lbg = []  # Constraint lb value
         ubg = []  # Constraint ub value
 
-        # Diagonal scaling for collocation constraints.
-        # lat/lon ODE residuals are O(1e-5 rad/s) while h,m,ts are O(1).
-        # Multiplying the lat/lon rows by R_EARTH makes all rows O(m/s),
-        # dramatically improving IPOPT conditioning without changing the
-        # feasible set (scaling a zero-equality by a constant).
-        _cscale = ca.vertcat(R_EARTH, R_EARTH, 1, 1, 1)
+        # Diagonal scaling for collocation constraint residuals.
+        # With NLP variable scaling (S_X), the dynamics rates are:
+        #   dlat_s ~ 4e-4,  dlon_s ~ 8e-4,  dh_s ~ 1e-4,
+        #   dm_s ~ 4e-5,    dts ~ 1
+        # Multiplied by dt (~600 s) the residuals are O(0.02–0.5)
+        # for lat/lon/h/m but O(600) for ts.  This _cscale brings
+        # all rows into the same order of magnitude.
+        _cscale = ca.vertcat(1.0, 1.0, 10.0, 50.0, 1e-3)
 
         # For plotting x and u given w
         X = []
@@ -295,18 +307,22 @@ class Cruise(Base):
         ubw.append([ca.inf])
         w0.append([self.range * 1000 / 200])
 
-        # aircraft performane constraints
+        # aircraft performance constraints
+        # (states are in scaled NLP units – unscale for physics)
+        _Sh_inv = float(S_X_INV[2])   # 10 000
+        _Sm_inv = float(S_X_INV[3])   # 70 000
         for k in range(self.nodes):
             S = self.aircraft["wing"]["area"]
-            mass = X[k][3]
-            v = oc.aero.mach2tas(U[k][0], X[k][2], dT=self.dT)
+            h_phys    = X[k][2] * _Sh_inv            # scaled → m
+            mass_phys = X[k][3] * _Sm_inv            # scaled → kg
+            v = oc.aero.mach2tas(U[k][0], h_phys, dT=self.dT)
             tas = v / kts
-            alt = X[k][2] / ft
-            rho = oc.aero.density(X[k][2], dT=self.dT)
+            alt = h_phys / ft
+            rho = oc.aero.density(h_phys, dT=self.dT)
             thrust_max = self.thrust.cruise(tas, alt, dT=self.dT)
 
             # max_thrust * 95% > drag (5% margin)
-            g.append(thrust_max * 0.95 - self.drag.clean(mass, tas, alt, dT=self.dT))
+            g.append(thrust_max * 0.95 - self.drag.clean(mass_phys, tas, alt, dT=self.dT))
             lbg.append([0])
             ubg.append([ca.inf])
 
@@ -317,7 +333,7 @@ class Cruise(Base):
             ck = self.drag.polar["clean"]["k"]
             cl_max = ca.sqrt(ca.fmax(1e-10, (cd_max - cd0) / ck))
             L_max = cl_max * 0.5 * rho * v**2 * S
-            g.append(L_max * 0.8 - mass * oc.aero.g0)
+            g.append(L_max * 0.8 - mass_phys * oc.aero.g0)
             lbg.append([0])
             ubg.append([ca.inf])
 
@@ -373,13 +389,14 @@ class Cruise(Base):
                 lbg.append([0])
                 ubg.append([ca.inf])
 
-        # add fuel constraint
+        # add fuel constraint  (X[·][3] is in scaled mass units)
+        _Sm = float(S_X[3])  # 1 / 70 000
         g.append(X[0][3] - X[-1][3])
         lbg.append([0])
-        ubg.append([self.fuel_max])
+        ubg.append([self.fuel_max * _Sm])
 
         if customized_max_fuel is not None:
-            g.append(X[0][3] - X[-1][3] - customized_max_fuel)
+            g.append(X[0][3] - X[-1][3] - customized_max_fuel * _Sm)
             lbg.append([-ca.inf])
             ubg.append([0])
 
