@@ -194,6 +194,10 @@ class Cruise(Base):
 
         C, D, B = self.collocation_coeff()
 
+        # Legendre collocation roots for interior-point guessing
+        # tau_root[0] = 0 (node start), tau_root[1..polydeg] = interior points
+        _tau_root = np.append(0, ca.collocation_points(self.polydeg, "legendre"))
+
         # Start with an empty NLP
         w = []  # Containing all the states & controls generated
         w0 = []  # Containing the initial guess for w
@@ -249,6 +253,11 @@ class Cruise(Base):
                 w0.append(self.u_guess)
 
             # State at collocation points
+            # Use linear interpolation between node k and k+1 at
+            # each Legendre root so the initial guess is consistent
+            # with the dynamics and the collocation residual is small.
+            x_k   = self.x_guess[k]
+            x_kp1 = self.x_guess[min(k + 1, len(self.x_guess) - 1)]
             Xc = []
             for j in range(self.polydeg):
                 Xkj = ca.MX.sym("X_" + str(k) + "_" + str(j), nstates)
@@ -256,7 +265,9 @@ class Cruise(Base):
                 w.append(Xkj)
                 lbw.append(self.x_lb)
                 ubw.append(self.x_ub)
-                w0.append(self.x_guess[k])
+                # Interior point at Legendre root tau_{j+1}
+                tau_j = _tau_root[j + 1]
+                w0.append((1.0 - tau_j) * x_k + tau_j * x_kp1)
 
             # Loop over collocation points
             Xk_end = D[0] * Xk
