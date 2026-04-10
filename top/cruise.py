@@ -1,4 +1,4 @@
-import warnings
+﻿import warnings
 from math import pi
 
 import casadi as ca
@@ -39,7 +39,7 @@ class Cruise(Base):
         See ``S_X`` / ``S_X_INV`` in base.py for the numeric values.
         """
 
-        # ── helpers ─────────────────────────────────────────────────
+        # â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Sl, So, Sh, Sm, St = S_X          # 10, 10, 1e-4, 1/70000, 1
 
         # Origin / destination in radians (state coordinates)
@@ -51,7 +51,7 @@ class Cruise(Base):
 
         # Bounding box in radians with generous margins
         lat_margin = 10.0 * d2r   # ~10 deg (~1100 km)
-        lon_margin = 15.0 * d2r   # ~15 deg (wider – longitude shrinks at high lat)
+        lon_margin = 15.0 * d2r   # ~15 deg (wider â€“ longitude shrinks at high lat)
         lat_min = min(lat_0, lat_f) - lat_margin
         lat_max = max(lat_0, lat_f) + lat_margin
         lon_min = min(lon_0, lon_f) - lon_margin
@@ -74,7 +74,7 @@ class Cruise(Base):
         hdg_final = (oc.aero.bearing(self.lat2, self.lon2, self.lat1, self.lon1) + 180) % 360
         psi_f = hdg_final * pi / 180
 
-        # ── ALL state bounds are in SCALED units ────────────────────
+        # â”€â”€ ALL state bounds are in SCALED units â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Initial conditions - Lower upper bounds
         self.x_0_lb = [lat_0*Sl, lon_0*So, h_min*Sh, self.mass_init*Sm, ts_min*St]
         self.x_0_ub = [lat_0*Sl, lon_0*So, h_max*Sh, self.mass_init*Sm, ts_min*St]
@@ -212,7 +212,7 @@ class Cruise(Base):
         # With NLP variable scaling (S_X), the dynamics rates are:
         #   dlat_s ~ 4e-4,  dlon_s ~ 8e-4,  dh_s ~ 1e-4,
         #   dm_s ~ 4e-5,    dts ~ 1
-        # Multiplied by dt (~600 s) the residuals are O(0.02–0.5)
+        # Multiplied by dt (~600 s) the residuals are O(0.02â€“0.5)
         # for lat/lon/h/m but O(600) for ts.  This _cscale brings
         # all rows into the same order of magnitude.
         _cscale = ca.vertcat(1.0, 1.0, 10.0, 50.0, 1e-3)
@@ -319,13 +319,13 @@ class Cruise(Base):
         w0.append([self.range * 1000 / 200])
 
         # aircraft performance constraints
-        # (states are in scaled NLP units – unscale for physics)
+        # (states are in scaled NLP units â€“ unscale for physics)
         _Sh_inv = float(S_X_INV[2])   # 10 000
         _Sm_inv = float(S_X_INV[3])   # 70 000
         for k in range(self.nodes):
             S = self.aircraft["wing"]["area"]
-            h_phys    = X[k][2] * _Sh_inv            # scaled → m
-            mass_phys = X[k][3] * _Sm_inv            # scaled → kg
+            h_phys    = X[k][2] * _Sh_inv            # scaled â†’ m
+            mass_phys = X[k][3] * _Sm_inv            # scaled â†’ kg
             v = oc.aero.mach2tas(U[k][0], h_phys, dT=self.dT)
             tas = v / kts
             alt = h_phys / ft
@@ -400,7 +400,7 @@ class Cruise(Base):
                 lbg.append([0])
                 ubg.append([ca.inf])
 
-        # add fuel constraint  (X[·][3] is in scaled mass units)
+        # add fuel constraint  (X[Â·][3] is in scaled mass units)
         _Sm = float(S_X[3])  # 1 / 70 000
         g.append(X[0][3] - X[-1][3])
         lbg.append([0])
@@ -426,7 +426,16 @@ class Cruise(Base):
         nlp = {"f": J, "x": w, "g": g}
 
         self.solver = ca.nlpsol("solver", "ipopt", nlp, self.solver_options)
-        self.solution = self.solver(x0=w0, lbx=lbw, ubx=ubw, lbg=lbg, ubg=ubg)
+
+        # ── warm-start support (v10) ─────────────────────────────────
+        warm = kwargs.get("warm_start", None)
+        if warm is not None:
+            self.solution = self.solver(
+                x0=warm["x0"], lbx=lbw, ubx=ubw, lbg=lbg, ubg=ubg,
+                lam_x0=warm["lam_x0"], lam_g0=warm["lam_g0"],
+            )
+        else:
+            self.solution = self.solver(x0=w0, lbx=lbw, ubx=ubw, lbg=lbg, ubg=ubg)
 
         # final timestep
         ts_final = self.solution["x"][-1].full()[0][0]
