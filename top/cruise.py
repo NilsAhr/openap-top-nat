@@ -17,7 +17,7 @@ class Cruise(Base):
         self.fix_mach = False
         self.fix_alt = False
         self.fix_track = False
-        self.allow_descent = True
+        self.allow_descent = False
 
     def fix_mach_number(self):
         self.fix_mach = True
@@ -137,6 +137,14 @@ class Cruise(Base):
                 usually a exsiting flight trajectory.
             - return_failed (bool): If True, returns the DataFrame even if the
                 optimization fails. Default is False.
+            - reg_weights (dict): Soft-penalty (regularisation) weights on
+                consecutive control changes.  Adds
+                  w * Σ(ΔU_k)²  to the objective for each channel.
+                Keys / typical values:
+                  "mach"    : 10.0   (Mach number change)
+                  "vs"      : 1e-3   (vertical speed change, m/s)
+                  "heading" : 1.0    (heading change, rad)
+                Default is {} (no regularisation).
 
         Returns:
         - pd.DataFrame: A DataFrame containing the optimized trajectory.
@@ -316,7 +324,8 @@ class Cruise(Base):
         w.append(self.ts_final)
         lbw.append([0])
         ubw.append([ca.inf])
-        w0.append([self.range * 1000 / 200])
+        # self.range is in metres (from oc.aero.distance); 200 m/s ≈ typical cruise GS
+        w0.append([self.range / 200])
 
         # aircraft performance constraints
         # (states are in scaled NLP units â€“ unscale for physics)
@@ -356,9 +365,9 @@ class Cruise(Base):
 
         # # smooth Mach number change
         # for k in range(self.nodes - 1):
-        #     g.append(U[k + 1][0] - U[k][0])
-        #     lbg.append([-0.2])
-        #     ubg.append([0.2])  # to be tunned
+        #    g.append(U[k + 1][0] - U[k][0])
+        #    lbg.append([-0.2])
+        #    ubg.append([0.2])  # to be tunned
 
         # # smooth vertical rate change
         # for k in range(self.nodes - 1):
@@ -369,10 +378,10 @@ class Cruise(Base):
         # smooth heading change
         for k in range(self.nodes - 1):
             g.append(U[k + 1][2] - U[k][2])
-            #lbg.append([-15 * pi / 180])
-            #ubg.append([15 * pi / 180])
-            lbg.append([-5 * pi / 180])
-            ubg.append([5 * pi / 180])
+            lbg.append([-15 * pi / 180])
+            ubg.append([15 * pi / 180])
+            #lbg.append([-5 * pi / 180])
+            #ubg.append([5 * pi / 180])
 
 
         # optional constraints
@@ -410,6 +419,32 @@ class Cruise(Base):
             g.append(X[0][3] - X[-1][3] - customized_max_fuel * _Sm)
             lbg.append([-ca.inf])
             ubg.append([0])
+
+        # ── Soft regularisation on consecutive control changes ────
+        # Adds  w * Σ(ΔU_k)²  to J for Mach, VS, heading.
+        # This discourages the solver from "hunting" B-spline wind
+        # peaks via small, jagged oscillations in speed / altitude /
+        # heading.  Weights are tuned relative to the (scaled) fuel
+        # objective (J ≈ 3–5 with obj_scale = 1e-4).
+        reg_weights = kwargs.get("reg_weights", {})
+        _w_mach = float(reg_weights.get("mach", 0.0))
+        _w_vs   = float(reg_weights.get("vs", 0.0))
+        _w_psi  = float(reg_weights.get("heading", 0.0))
+
+        if _w_mach > 0 or _w_vs > 0 or _w_psi > 0:
+            dU_mach = ca.vertcat(*[U[k+1][0] - U[k][0]
+                                   for k in range(self.nodes - 1)])
+            dU_vs   = ca.vertcat(*[U[k+1][1] - U[k][1]
+                                   for k in range(self.nodes - 1)])
+            dU_psi  = ca.vertcat(*[U[k+1][2] - U[k][2]
+                                   for k in range(self.nodes - 1)])
+            J += _w_mach * ca.sumsqr(dU_mach)
+            J += _w_vs   * ca.sumsqr(dU_vs)
+            J += _w_psi  * ca.sumsqr(dU_psi)
+
+            if self.debug:
+                print(f"  Regularisation: w_mach={_w_mach}, "
+                      f"w_vs={_w_vs}, w_heading={_w_psi}")
 
         # Concatenate vectors
         w = ca.vertcat(*w)

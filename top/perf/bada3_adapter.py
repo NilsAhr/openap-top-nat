@@ -347,7 +347,7 @@ class BADA3FuelFlowAdapter(FuelFlowBase):
         # Thrust coefficients for max thrust calculation
         self._Ct0, self._Ct1, self._Ct2, self._Ct3, self._Ct4 = data["Ct"]
 
-        self._g = 9.81
+        self._g = 9.80665  # Standard gravity for weight calculations
         
         # Vertical speed threshold for determining level cruise (ft/min)
         # Bluesky uses phase flags; we approximate with vs threshold

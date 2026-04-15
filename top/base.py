@@ -169,6 +169,12 @@ class Base:
 
         self.wind = None
 
+        # ── Objective scaling ────────────────────────────────────────────
+        # IPOPT converges best when J ≈ O(1–100).  Raw fuel objective is
+        # O(30 000–50 000) kg for a wide-body transatlantic flight.
+        # Default 1e-4 maps 38 000 kg → 3.8.
+        self.obj_scale = 1e-4
+
         # Check cruise range
         self.range = oc.aero.distance(self.lat1, self.lon1, self.lat2, self.lon2)
         if self.wrap is not None:  # Add this check
@@ -466,6 +472,24 @@ class Base:
                     flight.timestamp - flight.timestamp.min()
                 ).dt.total_seconds()
 
+        # ── Resample to self.nodes + 1 points if needed ─────────────────
+        # The NLP expects exactly (self.nodes + 1) state samples.  An
+        # external DataFrame may have a different number of rows (e.g. 61
+        # points while the NLP uses ~110 nodes).  Linearly interpolate all
+        # five state channels so the guess and the NLP match.
+        arrays = [np.asarray(a, dtype=float) for a in
+                  [lat_guess, lon_guess, h_guess, m_guess, ts_guess]]
+        n_have   = len(arrays[0])
+        n_target = self.nodes + 1
+        if n_have != n_target:
+            if hasattr(self, 'debug') and self.debug:
+                print(f"initial_guess: resampling external guess from "
+                      f"{n_have} → {n_target} points")
+            t_old = np.linspace(0, 1, n_have)
+            t_new = np.linspace(0, 1, n_target)
+            arrays = [np.interp(t_new, t_old, a) for a in arrays]
+        lat_guess, lon_guess, h_guess, m_guess, ts_guess = arrays
+
         # Scale to NLP units: x_s = x_phys * S_X
         x_phys = np.vstack([lat_guess, lon_guess, h_guess, m_guess, ts_guess]).T
         return x_phys * S_X[np.newaxis, :]   # broadcast (N, 5) * (1, 5)
@@ -679,6 +703,9 @@ class Base:
         for key, value in ipopt_kwargs.items():
             self.solver_options[f"ipopt.{key}"] = value
 
+        # Allow override of objective scaling per setup() call
+        self.obj_scale = kwargs.get("obj_scale", self.obj_scale)
+
     def init_model(self, objective, **kwargs):
         autoscale_cost = kwargs.get("auto_scale_cost", False)
 
@@ -714,8 +741,10 @@ class Base:
         else:
             self.objective = getattr(self, f"obj_{objective}")
 
-        # Objective evaluated on *physical* states
-        L = self.objective(x_phys, self.u, self.dt, **kwargs)
+        # Objective evaluated on *physical* states, then scaled so that
+        # J ≈ O(1–100) for good IPOPT conditioning.  The default
+        # obj_scale = 1e-4 maps a typical fuel burn of ~38 000 kg to ~3.8.
+        L = self.objective(x_phys, self.u, self.dt, **kwargs) * self.obj_scale
 
         if autoscale_cost:
             # Normalise objective by initial-guess cost
@@ -787,12 +816,9 @@ class Base:
             if self.perf_model.lower() == "bada3":
                 fuelflow = self.fuelflow  # BADA3 adapter (symbolic-safe)
             else:
-                fuelflow = oc.FuelFlow(
-                    self.actype,
-                    self.engtype,
-                    use_synonym=self.use_synonym,
-                    force_engine=True
-                    )
+                # Use self.fuelflow (wave_drag=True) so the objective
+                # is consistent with the mass dynamics in xdot().
+                fuelflow = self.fuelflow
 
         else:
             # Numeric conversions
