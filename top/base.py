@@ -692,7 +692,7 @@ class Base:
             "ipopt.fixed_variable_treatment": "relax_bounds",
             "ipopt.tol": tol,
             "ipopt.acceptable_tol": acceptable_tol,
-            "ipopt.acceptable_iter": 15,            # accept after 15 near-converged iters
+            "ipopt.acceptable_iter": 10,            # accept after 15 near-converged iters
             "ipopt.acceptable_constr_viol_tol": 1e-4,  # ~100 m acceptable constraint viol
             "ipopt.nlp_scaling_method": "gradient-based",
             "ipopt.mu_strategy": "adaptive",
