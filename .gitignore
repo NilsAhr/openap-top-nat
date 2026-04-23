@@ -48,6 +48,13 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Claude Code — personal local overrides (machine-specific paths, personal notes)
+CLAUDE.local.md
+CLAUDE.md
+# Claude Code — local settings (personal tool permissions, not for sharing)
+.claude/settings.local.json
+.claude/
+
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
