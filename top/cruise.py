@@ -98,6 +98,29 @@ class Cruise(Base):
             mach_hi = self.mach_max
             mach_lo_mid = 0.78
             mach_guess = self.mach_max - 0.03
+            # Optional LRC-style Mach cap (OPT_MACH_CAP) so free-Mach S3 cruises
+            # at a realistic long-range Mach instead of pinning to MMO. Clamp the
+            # upper bound and every lower bound/guess to <= cap to keep lb<=ub.
+            # LRC-style Mach cap. DEFAULT for perf_model='bada3' = the per-type
+            # APF cruise Mach (realistic long-range cruise, not MMO), so the
+            # optimiser doesn't sit at the barber pole. Override with
+            # OPT_MACH_CAP=<float>|apf|0 (0/empty disables).
+            import os
+            _cap = os.environ.get("OPT_MACH_CAP", None)
+            if _cap is None:
+                cap_val = (self._apf_cruise_mach()
+                           if getattr(self, "perf_model", None) == "bada3" else None)
+            elif _cap in ("", "0"):
+                cap_val = None
+            elif _cap.lower() == "apf":
+                cap_val = self._apf_cruise_mach()
+            else:
+                cap_val = float(_cap)
+            if cap_val:
+                mach_hi = min(mach_hi, cap_val)
+                mach_lo_init = min(mach_lo_init, mach_hi)
+                mach_lo_mid = min(mach_lo_mid, mach_hi)
+                mach_guess = min(mach_guess, mach_hi)
 
         # Control init - lower and upper bounds (use initial bearing)
         self.u_0_lb = [fixed_mach or mach_lo_init, -500 * fpm, psi - pi / 4]
@@ -143,7 +166,7 @@ class Cruise(Base):
                 Keys / typical values:
                   "mach"    : 10.0   (Mach number change)
                   "vs"      : 1e-3   (vertical speed change, m/s)
-                  "heading" : 1.0    (heading change, rad)
+                  "heading" : 0.0    (heading change, rad)
                 Default is {} (no regularisation).
 
         Returns:
@@ -331,6 +354,9 @@ class Cruise(Base):
         # (states are in scaled NLP units â€“ unscale for physics)
         _Sh_inv = float(S_X_INV[2])   # 10 000
         _Sm_inv = float(S_X_INV[3])   # 70 000
+        _use_bs_ceiling = self._use_bluesky_ceiling()
+        if _use_bs_ceiling:
+            _bs_hMO, _bs_hmax, _bs_gw, _bs_mmax = self._bluesky_ceiling_coeffs()
         for k in range(self.nodes):
             S = self.aircraft["wing"]["area"]
             h_phys    = X[k][2] * _Sh_inv            # scaled â†’ m
@@ -341,21 +367,33 @@ class Cruise(Base):
             rho = oc.aero.density(h_phys, dT=self.dT)
             thrust_max = self.thrust.cruise(tas, alt, dT=self.dT)
 
-            # max_thrust * 95% > drag (5% margin)
-            g.append(thrust_max * 0.95 - self.drag.clean(mass_phys, tas, alt, dT=self.dT))
-            lbg.append([0])
-            ubg.append([ca.inf])
+            if _use_bs_ceiling:
+                # BlueSky-equivalent envelope: h <= min(hMO, hmax + gw*(mmax-mass))
+                # (NATBlue BADA3 OPF ceiling, no thrust/lift safety margin) plus a
+                # bare thrust >= drag feasibility so cruise stays sustainable.
+                hmaxact = ca.fmin(_bs_hMO, _bs_hmax + _bs_gw * (_bs_mmax - mass_phys))
+                g.append(hmaxact - h_phys)
+                lbg.append([0])
+                ubg.append([ca.inf])
+                g.append(thrust_max - self.drag.clean(mass_phys, tas, alt, dT=self.dT))
+                lbg.append([0])
+                ubg.append([ca.inf])
+            else:
+                # max_thrust * 95% > drag (5% margin)
+                g.append(thrust_max * 0.95 - self.drag.clean(mass_phys, tas, alt, dT=self.dT))
+                lbg.append([0])
+                ubg.append([ca.inf])
 
-            # max lift * 80% > weight (20% margin)
-            drag_max = thrust_max * 0.9
-            cd_max = drag_max / (0.5 * rho * v**2 * S + 1e-10)
-            cd0 = self.drag.polar["clean"]["cd0"]
-            ck = self.drag.polar["clean"]["k"]
-            cl_max = ca.sqrt(ca.fmax(1e-10, (cd_max - cd0) / ck))
-            L_max = cl_max * 0.5 * rho * v**2 * S
-            g.append(L_max * 0.8 - mass_phys * oc.aero.g0)
-            lbg.append([0])
-            ubg.append([ca.inf])
+                # max lift * 80% > weight (20% margin)
+                drag_max = thrust_max * 0.9
+                cd_max = drag_max / (0.5 * rho * v**2 * S + 1e-10)
+                cd0 = self.drag.polar["clean"]["cd0"]
+                ck = self.drag.polar["clean"]["k"]
+                cl_max = ca.sqrt(ca.fmax(1e-10, (cd_max - cd0) / ck))
+                L_max = cl_max * 0.5 * rho * v**2 * S
+                g.append(L_max * 0.8 - mass_phys * oc.aero.g0)
+                lbg.append([0])
+                ubg.append([ca.inf])
 
         # ts and dt should be consistent
         for k in range(self.nodes - 1):

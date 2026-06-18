@@ -360,6 +360,82 @@ class Base:
 
             return lon, lat
 
+    def _use_bluesky_ceiling(self):
+        """Use NATBlue's BADA3 OPF altitude ceiling (no thrust/lift safety
+        margin) instead of the conservative margin scan, so the optimiser's
+        altitude envelope matches the BlueSky simulator exactly.
+
+        DEFAULT ON for perf_model='bada3' (the simulator uses BADA3, so the
+        envelopes must match). Override with OPT_USE_BLUESKY_CEILING=0/1."""
+        import os
+        v = os.environ.get("OPT_USE_BLUESKY_CEILING", None)
+        if v is not None:
+            return v not in ("0", "", "false", "False")
+        return getattr(self, "perf_model", None) == "bada3"
+
+    def _bluesky_ceiling_coeffs(self):
+        """Lazily parse the BADA3 OPF for the BlueSky ceiling coefficients.
+        Returns (hMO_m, hmax_m, gw_m_per_kg, mmax_kg) for
+        hmaxact = min(hMO, hmax + gw*(mmax - mass)) — matches NATBlue
+        perfbada.limits() at ISA (temp term ~0)."""
+        cached = getattr(self, "_bs_ceiling_coeffs", None)
+        if cached is not None:
+            return cached
+        import os, glob, re
+        from openap.extra.aero import ft as _ft
+        hMO_m = float(self.aircraft["limits"]["ceiling"])
+        mmax_kg = float(self.aircraft["mtow"])
+        hmax_m, gw_m = hMO_m, 0.0
+        paths = glob.glob(os.path.join(self.bada3_path, f"{self.actype}*.OPF"))
+        if paths:
+            lines = open(paths[0], encoding="utf-8", errors="replace").read().splitlines()
+            def _f(s):
+                return [float(x) for x in re.findall(
+                    r'[-+]?\.\d+E[+-]\d+|[-+]?\d+\.\d+E[+-]\d+', s)]
+            for i, l in enumerate(lines):
+                if "VMO" in l and l.strip().startswith("CC"):
+                    env = _f(lines[i + 1])          # VMO, MMO, hMO, hmax, tempgrad
+                    if len(env) >= 4:
+                        hmax_m = env[3] * _ft
+                    for j in range(i - 1, max(i - 6, 0), -1):
+                        mv = _f(lines[j])           # m_ref, m_min, m_max, m_pay, mass_grad
+                        if len(mv) >= 5 and 30 < mv[2] < 700:
+                            gw_m = mv[4] * _ft       # ft/kg -> m/kg
+                            break
+                    break
+        self._bs_ceiling_coeffs = (hMO_m, hmax_m, gw_m, mmax_kg)
+        return self._bs_ceiling_coeffs
+
+    def _bluesky_hmaxact(self, mass):
+        """Numeric BlueSky-equivalent max altitude (m) for the given mass."""
+        hMO, hmax, gw, mmax = self._bluesky_ceiling_coeffs()
+        return min(hMO, hmax + gw * (mmax - mass))
+
+    def _apf_cruise_mach(self):
+        """Per-type cruise Mach from the BADA3 APF file (AV company-mass row).
+        Used as a realistic long-range-cruise cap when OPT_MACH_CAP=apf. The APF
+        data row is `... AV  <climb cas cas mc>  <cruise cas cas mc> ...`; the
+        cruise Mach is the 6th numeric token after the AV label, stored x100.
+        Returns float Mach or None if unavailable."""
+        cached = getattr(self, "_apf_mach_cached", "unset")
+        if cached != "unset":
+            return cached
+        import os, glob, re
+        val = None
+        paths = glob.glob(os.path.join(self.bada3_path, f"{self.actype}*.APF"))
+        if paths:
+            for line in open(paths[0], encoding="utf-8", errors="replace"):
+                toks = line.split()
+                if not toks or toks[0] != "CD" or "AV" not in toks:
+                    continue
+                nums = [t for t in toks[toks.index("AV") + 1:]
+                        if re.fullmatch(r"-?\d+", t)]
+                if len(nums) >= 6:
+                    val = int(nums[5]) / 100.0
+                break
+        self._apf_mach_cached = val
+        return val
+
     def _max_feasible_altitude(self, mass, mach=None):
         """Find the highest altitude where thrust and lift constraints
         are satisfied for the given *mass* and *mach*.
@@ -368,6 +444,8 @@ class Base:
         metres, or ``h_min`` (FL200) if nothing is feasible.
         """
         from openap.extra.aero import ft as _ft, kts as _kts
+        if self._use_bluesky_ceiling():
+            return max(self._bluesky_hmaxact(mass), 20_000 * _ft)
         if mach is None:
             mach = self.mach_max - 0.03  # same as control initial guess
 
