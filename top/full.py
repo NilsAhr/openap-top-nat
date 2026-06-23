@@ -193,6 +193,11 @@ class CompleteFlight(Base):
             mach_cruise_lo = min(mach_cruise_lo, mach_hi)
             mach_guess = min(mach_guess, mach_hi)
 
+        # Expose the effective cruise Mach ceiling so trajectory() can clamp an
+        # optional cruise-phase Mach FLOOR to it (a floor must never exceed the
+        # ceiling, else the cruise NLP is trivially infeasible).
+        self._mach_hi = mach_hi
+
         # ── state bounds (SCALED) ────────────────────────────────────
         # Initial: on the ground at the origin, full mass, t = 0
         self.x_0_lb = [lat_0 * Sl, lon_0 * So, h_min * Sh, self.mass_init * Sm, ts_min * St]
@@ -391,7 +396,26 @@ class CompleteFlight(Base):
             lbg.append([0])
             ubg.append([ca.inf])
 
-        # ----- CRUISE (idx_toc .. idx_tod): min FL300 + |VS| <= 500 fpm -----
+        # Optional cruise-phase Mach FLOOR. With a pure-fuel objective and Mach
+        # free across the flight, the optimiser drifts to an unrealistically low
+        # cruise Mach (the fuel optimum ~M0.65), which also drags cruise altitude
+        # down. Lifting a floor on the CRUISE nodes only (climb/descent keep their
+        # low-Mach control bound) restores a realistic cruise speed. Clamped to
+        # the effective Mach ceiling so it can never exceed the APF/MMO cap.
+        _mach_floor = kwargs.get("mach_cruise_min", None)
+        if _mach_floor is not None:
+            _mach_floor = min(float(_mach_floor),
+                              float(getattr(self, "_mach_hi", self.mach_max)))
+
+        # Cruise vertical-speed LOWER bound (fpm). Default -500 fpm permits a
+        # mid-cruise descent, which the pure-fuel optimiser exploits as a
+        # numerical artifact -> a non-monotonic "wobbly" cruise altitude. Setting
+        # this to 0 forbids descent in cruise (level flight or cruise-climb only,
+        # i.e. altitude rises as fuel burns -- the realistic and fuel-optimal
+        # shape). Upper bound stays +500 fpm (gentle cruise-climb / step-climb).
+        _cruise_vs_min_fpm = float(kwargs.get("cruise_vs_min", -500.0))
+
+        # ----- CRUISE (idx_toc .. idx_tod): min FL300 + VS in [vs_min, 500] -----
         for k in range(idx_toc, idx_tod):
             # Minimum cruise altitude (state is SCALED -> compare in scaled units)
             g.append(X[k][2] - h_cruise_min * Sh)
@@ -399,8 +423,13 @@ class CompleteFlight(Base):
             ubg.append([ca.inf])
 
             g.append(U[k][1])
-            lbg.append([-500 * fpm])
+            lbg.append([_cruise_vs_min_fpm * fpm])
             ubg.append([500 * fpm])
+
+            if _mach_floor is not None:
+                g.append(U[k][0])
+                lbg.append([_mach_floor])
+                ubg.append([ca.inf])
 
         # ----- DESCENT (idx_tod .. end): negative ROC -----
         for k in range(idx_tod, self.nodes):
